@@ -305,7 +305,7 @@ validate_prerequisites() {
     fi
     
     # Vérification connectivité repository
-    if ! curl -s --connect-timeout 5 "http://$REPO_SERVER/kafka/" > /dev/null; then
+    if ! curl -s --connect-timeout 5 "http://$REPO_SERVER/repos/kafka3/" > /dev/null; then
         error_exit "Repository Kafka inaccessible sur $REPO_SERVER"
     fi
     
@@ -437,7 +437,7 @@ install_java_rpm() {
 # === INSTALLATION KAFKA ===
 install_kafka() {
     log "Installation Kafka $KAFKA_VERSION depuis repository local..."
-    log "URL : http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    log "URL : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
@@ -447,12 +447,12 @@ install_kafka() {
     cd /tmp
     
     # Téléchargement depuis repository local
-    if ! curl -f "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
+    if ! curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
         error_exit "Échec téléchargement Kafka depuis $REPO_SERVER"
     fi
     
     # Vérification checksum si disponible
-    if curl -f "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"; then
+    if curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"; then
         if sha512sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"; then
             log "✓ Checksum validé avec succès"
         else
