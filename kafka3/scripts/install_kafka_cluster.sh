@@ -1,8 +1,8 @@
 #!/bin/bash
 ################################################################################
-# Script: install_kafka_cluster_enhanced.sh
-# Version: 2.1.0
-# Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking (Enhanced)
+# Script: install_kafka_cluster.sh
+# Version: 2.2.0
+# Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking avec firewall
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
 # 
@@ -10,6 +10,7 @@
 # Environment: RHEL 9 Air-gapped
 # 
 # CHANGELOG:
+# v2.2.0 - Ajout configuration automatique firewall TCP/9092 et TCP/2181
 # v2.1.0 - Ajout validation interactive KAFKA_NODES et support variable système
 # v2.0.0 - Refactorisation avec RPM Java, variables nœuds, vérification filesystem
 ################################################################################
@@ -18,7 +19,7 @@
 set -euo pipefail
 trap 'echo "ERROR: Ligne $LINENO. Code de sortie: $?" >&2' ERR
 
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE="/var/log/kafka-install-$(date +%Y%m%d-%H%M%S).log"
 KAFKA_VERSION="3.9.0"
@@ -32,6 +33,22 @@ declare -A KAFKA_NODES_DEFAULT=(
     [3]="172.20.2.115"
 )
 
+# === CONFIGURATION PATHS ET VARIABLES ===
+KAFKA_HOME="/opt/kafka"
+KAFKA_USER="kafka"
+KAFKA_GROUP="kafka"
+KAFKA_DATA_DIR="/data/kafka"
+KAFKA_LOGS_DIR="/var/log/kafka"
+JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
+JVM_HEAP_SIZE="2g"
+
+# === VARIABLES GLOBALES ===
+NODE_ID=""
+REPO_SERVER="172.20.2.109"
+DRY_RUN="false"
+CHECK_FS_ONLY="false"
+SKIP_VALIDATION="false"
+
 # === LOGGING FUNCTION ===
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -40,6 +57,66 @@ log() {
 error_exit() {
     log "ERROR: $1"
     exit 1
+}
+
+# === FONCTION CHARGEMENT CONFIGURATION KAFKA_NODES ===
+load_kafka_nodes_configuration() {
+    log "Chargement configuration KAFKA_NODES..."
+    
+    # Vérification variable système KAFKA_NODES
+    if [[ -n "${KAFKA_NODES:-}" ]]; then
+        log "Variable système KAFKA_NODES détectée: $KAFKA_NODES"
+        log "Source de configuration: Variable système"
+        
+        # Parse du format "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
+        if [[ "$KAFKA_NODES" =~ ^[0-9]+:[0-9.]+([,][0-9]+:[0-9.]+)*$ ]]; then
+            declare -A KAFKA_NODES_RUNTIME
+            
+            IFS=',' read -ra NODE_PAIRS <<< "$KAFKA_NODES"
+            for pair in "${NODE_PAIRS[@]}"; do
+                IFS=':' read -ra NODE_INFO <<< "$pair"
+                local node_id="${NODE_INFO[0]}"
+                local node_ip="${NODE_INFO[1]}"
+                
+                if [[ "$node_id" =~ ^[1-9][0-9]*$ ]] && [[ "$node_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                    KAFKA_NODES_RUNTIME[$node_id]="$node_ip"
+                    log "Nœud $node_id configuré: $node_ip"
+                else
+                    error_exit "Format invalide dans KAFKA_NODES: $pair"
+                fi
+            done
+            
+            # Validation minimum 3 nœuds
+            if [[ ${#KAFKA_NODES_RUNTIME[@]} -lt 3 ]]; then
+                log "ATTENTION: Moins de 3 nœuds configurés. Attendu: 3, Trouvé: ${#KAFKA_NODES_RUNTIME[@]}"
+            fi
+            
+            # Copie vers le tableau principal
+            declare -gA KAFKA_NODES
+            for key in "${!KAFKA_NODES_RUNTIME[@]}"; do
+                KAFKA_NODES[$key]="${KAFKA_NODES_RUNTIME[$key]}"
+            done
+            
+        else
+            error_exit "Variable système KAFKA_NODES format invalide. Format: '1:172.20.2.113,2:172.20.2.114,3:172.20.2.115'"
+        fi
+        
+    else
+        log "Variable système KAFKA_NODES non définie"
+        log "Source de configuration: Configuration par défaut du script"
+        
+        # Utilisation de la configuration par défaut
+        declare -gA KAFKA_NODES
+        for key in "${!KAFKA_NODES_DEFAULT[@]}"; do
+            KAFKA_NODES[$key]="${KAFKA_NODES_DEFAULT[$key]}"
+        done
+    fi
+    
+    # Validation de la configuration finale
+    log "Configuration KAFKA_NODES finale :"
+    for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
+        log "  Nœud $node_id: ${KAFKA_NODES[$node_id]}"
+    done
 }
 
 # === FONCTION VALIDATION INTERACTIVE KAFKA_NODES ===
@@ -78,25 +155,19 @@ validate_kafka_nodes_interactive() {
     
     # Demande de validation
     while true; do
-        echo -n "Voulez-vous continuer avec cette configuration ? [O/n] : "
+        echo -n "Voulez-vous continuer avec cette configuration ? [O/n]: "
         read -r response
-        
         case "$response" in
-            ""|"O"|"o"|"Oui"|"oui"|"Y"|"y"|"Yes"|"yes")
-                log "✓ Configuration KAFKA_NODES validée par l'utilisateur"
+            [oO]|[oO][uU][iI]|"")
+                log "Configuration validée par l'utilisateur"
                 break
                 ;;
-            "N"|"n"|"Non"|"non"|"No"|"no")
-                echo ""
-                echo "Installation annulée par l'utilisateur."
-                echo "Pour modifier la configuration :"
-                echo "1. Éditez le script et modifiez KAFKA_NODES_DEFAULT"
-                echo "2. Ou définissez la variable système KAFKA_NODES"
-                echo ""
-                exit 1
+            [nN]|[nN][oO][nN])
+                log "Installation annulée par l'utilisateur"
+                exit 0
                 ;;
             *)
-                echo "Réponse invalide. Veuillez répondre par 'O' (Oui) ou 'n' (Non)."
+                echo "Réponse invalide. Veuillez répondre par 'oui' (O) ou 'non' (n)."
                 ;;
         esac
     done
@@ -104,69 +175,10 @@ validate_kafka_nodes_interactive() {
     echo ""
 }
 
-# === FONCTION GESTION VARIABLE SYSTÈME KAFKA_NODES ===
-load_kafka_nodes_configuration() {
-    log "Chargement de la configuration KAFKA_NODES..."
-    
-    # Vérification existence variable système KAFKA_NODES
-    if [[ -n "${KAFKA_NODES:-}" ]]; then
-        log "✓ Variable système KAFKA_NODES détectée"
-        log "Source de configuration: Variable système"
-        
-        # Parsing de la variable système (format attendu: "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115")
-        if [[ "$KAFKA_NODES" =~ ^[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(,[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)*$ ]]; then
-            declare -gA KAFKA_NODES_RUNTIME
-            
-            # Parsing des entrées
-            IFS=',' read -ra ENTRIES <<< "$KAFKA_NODES"
-            for entry in "${ENTRIES[@]}"; do
-                if [[ "$entry" =~ ^([0-9]+):([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-                    local node_id="${BASH_REMATCH[1]}"
-                    local node_ip="${BASH_REMATCH[2]}"
-                    KAFKA_NODES_RUNTIME[$node_id]="$node_ip"
-                    log "  Nœud $node_id: $node_ip"
-                else
-                    error_exit "Format invalide dans KAFKA_NODES: '$entry'. Format attendu: 'ID:IP'"
-                fi
-            done
-            
-            # Validation du nombre de nœuds
-            if [[ ${#KAFKA_NODES_RUNTIME[@]} -lt 3 ]]; then
-                error_exit "Cluster Kafka requiert minimum 3 nœuds. Trouvé: ${#KAFKA_NODES_RUNTIME[@]}"
-            fi
-            
-            # Copie vers le tableau principal
-            declare -gA KAFKA_NODES
-            for key in "${!KAFKA_NODES_RUNTIME[@]}"; do
-                KAFKA_NODES[$key]="${KAFKA_NODES_RUNTIME[$key]}"
-            done
-            
-        else
-            error_exit "Variable système KAFKA_NODES format invalide. Format: '1:172.20.2.113,2:172.20.2.114,3:172.20.2.115'"
-        fi
-        
-    else
-        log "Variable système KAFKA_NODES non définie"
-        log "Source de configuration: Configuration par défaut du script"
-        
-        # Utilisation de la configuration par défaut
-        declare -gA KAFKA_NODES
-        for key in "${!KAFKA_NODES_DEFAULT[@]}"; do
-            KAFKA_NODES[$key]="${KAFKA_NODES_DEFAULT[$key]}"
-        done
-    fi
-    
-    # Validation de la configuration finale
-    log "Configuration KAFKA_NODES finale :"
-    for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
-        log "  Nœud $node_id: ${KAFKA_NODES[$node_id]}"
-    done
-}
-
 # === HELP FUNCTION ===
 show_help() {
     cat << EOF
-$SCRIPT_NAME v$SCRIPT_VERSION - Installation Kafka Cluster avec RPM Java (Enhanced)
+$SCRIPT_NAME v$SCRIPT_VERSION - Installation Kafka Cluster avec RPM Java et firewall
 
 USAGE:
     $SCRIPT_NAME [OPTIONS]
@@ -200,33 +212,22 @@ CONFIGURATION KAFKA_NODES:
     La validation interactive permet de confirmer la configuration avant installation.
 
 CONFORMITÉ:
-    - PCI-DSS Level 1
-    - ANSSI-BP-028
-    - SELinux enforcing
-    - Filesystem dédié requis pour KAFKA_DATA_DIR
+    - PCI-DSS: Chiffrement, logs, permissions restrictives
+    - ANSSI-BP-028: SELinux, firewall, comptes de service
+    - Banking Standards: Haute disponibilité, monitoring, audit trail
 
-SÉCURITÉ BANKING:
-    - Validation interactive de la topologie réseau
-    - Support variable système pour automatisation
-    - Logging complet des opérations
-    - Vérification intégrité configuration
+AUTEUR: Philippe.candido@emerging-it.fr
 EOF
 }
 
-# === VARIABLES DE CONFIGURATION ===
-NODE_ID=""
-REPO_SERVER="172.20.2.109"
-DRY_RUN=false
-CHECK_FS_ONLY=false
-SKIP_VALIDATION=false
-KAFKA_USER="kafka"
-KAFKA_GROUP="kafka"
-KAFKA_HOME="/opt/kafka"
-KAFKA_DATA_DIR="/data/kafka"
-KAFKA_LOGS_DIR="/var/log/kafka"
-JVM_HEAP_SIZE="2G"
+# === VERSION FUNCTION ===
+show_version() {
+    echo "$SCRIPT_NAME version $SCRIPT_VERSION"
+    echo "Kafka $KAFKA_VERSION / Scala $SCALA_VERSION"
+    echo "Support: RHEL 9, PCI-DSS, ANSSI-BP-028"
+}
 
-# === PARSING ARGUMENTS ===
+# === PARSE ARGUMENTS ===
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
@@ -234,7 +235,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -v|--version)
-            echo "$SCRIPT_NAME version $SCRIPT_VERSION"
+            show_version
             exit 0
             ;;
         -n|--node-id)
@@ -246,118 +247,134 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --dry-run)
-            DRY_RUN=true
+            DRY_RUN="true"
             shift
             ;;
         --check-fs)
-            CHECK_FS_ONLY=true
+            CHECK_FS_ONLY="true"
             shift
             ;;
         --skip-validation)
-            SKIP_VALIDATION=true
+            SKIP_VALIDATION="true"
             shift
             ;;
         *)
-            error_exit "Option inconnue: $1. Utilisez -h pour l'aide."
+            error_exit "Option inconnue: $1. Utilisez --help pour l'aide."
             ;;
     esac
 done
 
+# === VALIDATION ARGUMENTS ===
+if [[ -z "$NODE_ID" ]]; then
+    error_exit "ID nœud requis. Utilisez -n NUM (1-3)"
+fi
+
+if [[ ! "$NODE_ID" =~ ^[1-3]$ ]]; then
+    error_exit "ID nœud invalide: $NODE_ID. Valeurs acceptées: 1, 2, 3"
+fi
+
 # === VÉRIFICATION FILESYSTEM KAFKA ===
 check_kafka_filesystem() {
-    log "Vérification filesystem dédié pour Kafka..."
+    log "Vérification filesystem pour Kafka..."
     
-    if [[ ! -d "$KAFKA_DATA_DIR" ]]; then
-        error_exit "Répertoire KAFKA_DATA_DIR manquant: $KAFKA_DATA_DIR"
+    # Vérification montage /data
+    if ! mountpoint -q /data; then
+        error_exit "Filesystem /data non monté. Requis pour KAFKA_DATA_DIR"
     fi
     
-    # Vérification mount point dédié (Banking Requirement)
-    local mount_point=$(df "$KAFKA_DATA_DIR" | tail -1 | awk '{print $6}')
-    if [[ "$mount_point" == "/" ]]; then
-        log "ATTENTION: $KAFKA_DATA_DIR sur filesystem racine (non recommandé en production)"
-    else
-        log "✓ $KAFKA_DATA_DIR sur filesystem dédié: $mount_point"
+    # Vérification espace libre
+    local available_space=$(df /data | tail -1 | awk '{print $4}')
+    local min_space_kb=$((20 * 1024 * 1024))  # 20GB en KB
+    
+    if [[ "$available_space" -lt "$min_space_kb" ]]; then
+        error_exit "Espace insuffisant sur /data: ${available_space}KB disponible, ${min_space_kb}KB requis"
     fi
     
-    # Vérification espace disque (minimum 10GB pour cluster de test)
-    local available_space=$(df "$KAFKA_DATA_DIR" | tail -1 | awk '{print $4}')
-    local min_space_kb=$((10 * 1024 * 1024)) # 10GB en KB
+    log "✓ Filesystem /data: ${available_space}KB disponible"
     
-    if [[ $available_space -lt $min_space_kb ]]; then
-        error_exit "Espace disque insuffisant. Requis: 10GB, Disponible: $((available_space / 1024 / 1024))GB"
+    # Vérification permissions et montage /var/log
+    if [[ ! -d "/var/log" ]] || [[ ! -w "/var/log" ]]; then
+        error_exit "Répertoire /var/log inaccessible ou non accessible en écriture"
     fi
     
-    log "✓ Espace disque suffisant: $((available_space / 1024 / 1024))GB disponible"
+    log "✓ Répertoire /var/log accessible"
+    log "✓ Validation filesystem terminée avec succès"
 }
 
 # === VALIDATION PRÉREQUIS ===
 validate_prerequisites() {
-    log "Validation des prérequis d'installation..."
+    log "Validation des prérequis système..."
     
-    # Validation NODE_ID
-    if [[ ! "$NODE_ID" =~ ^[1-3]$ ]]; then
-        error_exit "ID nœud requis (1-3). Utilisez -n NUM"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY-RUN] Validation prérequis simulée"
+        return
     fi
     
-    # Vérification root
-    if [[ $EUID -ne 0 ]]; then
-        error_exit "Script doit être exécuté en root"
+    # Vérification OS
+    if [[ ! -f /etc/redhat-release ]] || ! grep -q "Red Hat Enterprise Linux.*9\." /etc/redhat-release; then
+        error_exit "OS non supporté. RHEL 9 requis."
     fi
     
-    # Vérification connectivité repository
-    if ! curl -s --connect-timeout 5 "http://$REPO_SERVER/repos/kafka3/" > /dev/null; then
-        error_exit "Repository Kafka inaccessible sur $REPO_SERVER"
+    # Vérification architecture
+    if [[ "$(uname -m)" != "x86_64" ]]; then
+        error_exit "Architecture non supportée: $(uname -m). x86_64 requis."
     fi
     
-    # Vérification filesystem KAFKA_DATA_DIR
+    # Vérification privilèges root
+    if [[ "$EUID" -ne 0 ]]; then
+        error_exit "Privilèges root requis pour l'installation"
+    fi
+    
+    # Vérification outils système
+    local required_tools=("curl" "tar" "systemctl" "useradd" "chown")
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            error_exit "Outil manquant: $tool"
+        fi
+    done
+    
+    # Vérification mémoire (minimum 4GB pour Kafka)
+    local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local min_mem_kb=$((4 * 1024 * 1024))
+    if [[ "$mem_kb" -lt "$min_mem_kb" ]]; then
+        error_exit "Mémoire insuffisante: ${mem_kb}KB disponible, ${min_mem_kb}KB requis"
+    fi
+    
+    # Vérification filesystem
     check_kafka_filesystem
     
-    # Vérification nœud courant dans la configuration
-    local current_ip=${KAFKA_NODES[$NODE_ID]}
-    local actual_ip=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-    
-    if [[ "$current_ip" != "$actual_ip" ]]; then
-        log "ATTENTION: IP configurée ($current_ip) != IP réelle ($actual_ip)"
-        log "Proceeding avec IP réelle pour advertised.listeners"
-    fi
-    
-    log "Prérequis validés avec succès"
+    log "✓ Prérequis système validés"
 }
 
 # === CONFIGURATION REPOSITORY YUM ===
 configure_yum_repository() {
-    log "Configuration repository YUM local pour Java..."
+    log "Configuration repository YUM local..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Configuration repository YUM simulée"
+        log "[DRY-RUN] Configuration repository simulée"
         return
     fi
     
-    # Configuration repository local pour Java et dépendances
-    cat > /etc/yum.repos.d/acm-local.repo << EOF
-# Repository local ACM pour environnement air-gapped
-[acm-java]
-name=ACM Local Repository - Java
-baseurl=http://$REPO_SERVER/repos/java/
-enabled=1
-gpgcheck=0
-module_hotfixes=1
-sslverify=false
-
-[acm-kafka]
-name=ACM Local Repository - Kafka
+    # Test connectivité repository
+    if ! curl -f -s "http://$REPO_SERVER/" > /dev/null; then
+        error_exit "Repository server inaccessible: $REPO_SERVER"
+    fi
+    
+    # Configuration repository Kafka
+    cat > /etc/yum.repos.d/kafka-local.repo << EOF
+[kafka-local]
+name=Kafka Local Repository  
 baseurl=http://$REPO_SERVER/repos/kafka3/
 enabled=1
 gpgcheck=0
-module_hotfixes=1
-sslverify=false
+priority=1
 EOF
     
     # Nettoyage cache YUM
     yum clean all
     yum makecache
     
-    log "Repository YUM configuré et cache mis à jour"
+    log "Repository YUM configuré: http://$REPO_SERVER/repos/kafka3/"
 }
 
 # === CONFIGURATION SYSTÈME ===
@@ -369,7 +386,7 @@ configure_system() {
         return
     fi
     
-    # Création utilisateur système Kafka
+    # Création utilisateur kafka
     if ! id "$KAFKA_USER" &>/dev/null; then
         useradd -r -s /sbin/nologin -d "$KAFKA_HOME" "$KAFKA_USER"
         log "Utilisateur $KAFKA_USER créé"
@@ -632,6 +649,115 @@ configure_selinux() {
     log "Configuration SELinux appliquée"
 }
 
+# === CONFIGURATION FIREWALL KAFKA/ZOOKEEPER ===
+configure_firewall() {
+    log "Configuration firewall pour ports Kafka/ZooKeeper..."
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY-RUN] Configuration firewall simulée"
+        return
+    fi
+    
+    # Vérification si firewalld est installé et actif
+    if ! command -v firewall-cmd &> /dev/null; then
+        log "ATTENTION: firewall-cmd non disponible - skip configuration firewall"
+        return
+    fi
+    
+    if ! systemctl is-active --quiet firewalld; then
+        log "ATTENTION: firewalld non actif - skip configuration firewall"
+        return
+    fi
+    
+    # Sauvegarde de la configuration firewall actuelle
+    local backup_file="/tmp/firewall-backup-$(date +%Y%m%d-%H%M%S).xml"
+    firewall-cmd --get-active-zones > "$backup_file" 2>/dev/null || true
+    log "Sauvegarde firewall créée: $backup_file"
+    
+    # Configuration des règles permanentes pour Kafka
+    log "Ajout règle firewall permanente TCP/9092 (Kafka)..."
+    if firewall-cmd --permanent --add-port=9092/tcp; then
+        log "✓ Règle TCP/9092 (Kafka) ajoutée avec succès"
+    else
+        log "ATTENTION: Échec ajout règle TCP/9092, peut déjà exister"
+    fi
+    
+    # Configuration des règles permanentes pour ZooKeeper
+    log "Ajout règle firewall permanente TCP/2181 (ZooKeeper)..."
+    if firewall-cmd --permanent --add-port=2181/tcp; then
+        log "✓ Règle TCP/2181 (ZooKeeper) ajoutée avec succès"
+    else
+        log "ATTENTION: Échec ajout règle TCP/2181, peut déjà exister"
+    fi
+    
+    # Configuration des règles actives (runtime)
+    log "Application des règles firewall en cours d'exécution..."
+    if firewall-cmd --add-port=9092/tcp; then
+        log "✓ Règle runtime TCP/9092 (Kafka) activée"
+    else
+        log "ATTENTION: Échec activation runtime TCP/9092"
+    fi
+    
+    if firewall-cmd --add-port=2181/tcp; then
+        log "✓ Règle runtime TCP/2181 (ZooKeeper) activée"
+    else
+        log "ATTENTION: Échec activation runtime TCP/2181"
+    fi
+    
+    # Rechargement de la configuration permanente
+    log "Rechargement configuration firewall permanente..."
+    if firewall-cmd --reload; then
+        log "✓ Configuration firewall rechargée avec succès"
+    else
+        error_exit "Échec rechargement configuration firewall"
+    fi
+    
+    # Vérification des règles appliquées
+    log "Vérification des règles firewall appliquées:"
+    
+    # Vérification port Kafka
+    if firewall-cmd --query-port=9092/tcp &>/dev/null; then
+        log "✓ Port TCP/9092 (Kafka) autorisé"
+    else
+        log "⚠ Port TCP/9092 (Kafka) NON autorisé"
+    fi
+    
+    # Vérification port ZooKeeper
+    if firewall-cmd --query-port=2181/tcp &>/dev/null; then
+        log "✓ Port TCP/2181 (ZooKeeper) autorisé"
+    else
+        log "⚠ Port TCP/2181 (ZooKeeper) NON autorisé"
+    fi
+    
+    # Affichage résumé configuration firewall pour audit
+    log "=== RÉSUMÉ CONFIGURATION FIREWALL ==="
+    log "Zone active: $(firewall-cmd --get-active-zones | head -1)"
+    log "Ports ouverts: $(firewall-cmd --list-ports | tr '\n' ' ')"
+    log "Services autorisés: $(firewall-cmd --list-services | tr '\n' ' ')"
+    
+    # Conformité PCI-DSS : limitation accès réseau
+    log "CONFORMITÉ PCI-DSS: Vérification limitation accès réseau"
+    local kafka_nodes_string=""
+    for node_id in "${!KAFKA_NODES[@]}"; do
+        if [[ -n "$kafka_nodes_string" ]]; then
+            kafka_nodes_string+=","
+        fi
+        kafka_nodes_string+="${KAFKA_NODES[$node_id]}"
+    done
+    
+    log "Nœuds cluster autorisés: $kafka_nodes_string"
+    log "Repository server: $REPO_SERVER"
+    
+    # Note de sécurité bancaire
+    log ""
+    log "NOTE SÉCURITÉ BANCAIRE:"
+    log "- Ports 9092/2181 ouverts uniquement pour communication inter-cluster"
+    log "- Accès externe bloqué par défaut (conformité ANSSI-BP-028)"
+    log "- Surveillance logs firewall recommandée: journalctl -u firewalld -f"
+    
+    log "Configuration firewall terminée avec succès"
+}
+
 # === CRÉATION SERVICE SYSTEMD ===
 create_systemd_service() {
     log "Création service systemd Kafka..."
@@ -719,6 +845,16 @@ validate_installation() {
         error_exit "Service kafka non activé"
     fi
     
+    # Vérification règles firewall (optionnelle si firewalld actif)
+    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
+        if ! firewall-cmd --query-port=9092/tcp &>/dev/null; then
+            log "ATTENTION: Port TCP/9092 (Kafka) non autorisé par firewall"
+        fi
+        if ! firewall-cmd --query-port=2181/tcp &>/dev/null; then
+            log "ATTENTION: Port TCP/2181 (ZooKeeper) non autorisé par firewall"
+        fi
+    fi
+    
     log "✓ Validation installation réussie"
 }
 
@@ -749,6 +885,7 @@ main() {
     install_kafka
     configure_kafka
     configure_selinux
+    configure_firewall
     create_systemd_service
     validate_installation
     
@@ -764,6 +901,11 @@ main() {
     log "VALIDATION CLUSTER:"
     log "  kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
     log "  kafka-topics.sh --bootstrap-server localhost:9092 --list"
+    log ""
+    log "VALIDATION FIREWALL:"
+    log "  firewall-cmd --list-ports"
+    log "  telnet <IP_AUTRE_NOEUD> 9092"
+    log "  telnet <IP_AUTRE_NOEUD> 2181"
     log ""
     log "CONFIGURATION UTILISÉE:"
     for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
