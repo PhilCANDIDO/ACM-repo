@@ -405,7 +405,7 @@ configure_system() {
     fi
     
     # Création des répertoires avec permissions sécurisées
-    local directories=("$KAFKA_HOME" "$KAFKA_DATA_DIR" "$KAFKA_LOGS_DIR")
+    local directories=("$KAFKA_HOME" "$KAFKA_DATA_DIR" "$KAFKA_LOGS_DIR" "$KAFKA_HOME/logs")
     for dir in "${directories[@]}"; do
         mkdir -p "$dir"
         chown "$KAFKA_USER:$KAFKA_GROUP" "$dir"
@@ -809,8 +809,8 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=$KAFKA_DATA_DIR $KAFKA_LOGS_DIR
+ProtectSystem=full
+ReadWritePaths=$KAFKA_DATA_DIR $KAFKA_LOGS_DIR $KAFKA_HOME/logs
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]

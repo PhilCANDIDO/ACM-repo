@@ -1,8 +1,8 @@
 #!/bin/bash
 ################################################################################
 # Script: install_zookeeper.sh
-# Version: 3.0.0
-# Description: Installation ZooKeeper 3.8.4 pour cluster Kafka ACM Banking
+# Version: 4.0.0
+# Description: Configuration ZooKeeper depuis installation Kafka ACM Banking
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
 # 
@@ -10,25 +10,30 @@
 # Environment: RHEL 9 Air-gapped
 # Prérequis: install_kafka_cluster.sh doit être exécuté EN PREMIER
 # 
+# CHANGEMENTS MAJEURS v4.0.0:
+# - PLUS D'INSTALLATION ZOOKEEPER: utilise les binaires Kafka existants
+# - Configuration ZooKeeper depuis /opt/kafka/config/zookeeper.properties
+# - Création service systemd utilisant les binaires Kafka
+# - Suppression téléchargement et extraction archive ZooKeeper
+# - Conservation des fonctionnalités Basher Pro (dry-run, validation, etc.)
+# 
 # CHANGELOG:
-# v3.0.0 - Refactorisation complète selon méthode Basher Pro
-#        - Harmonisation avec install_kafka_cluster.sh
-#        - Ajout configuration SELinux et firewall complète
-#        - Support configuration KAFKA_NODES dynamique
-#        - Modes dry-run et validation interactive
-#        - Gestion d'idempotence et recovery
-#        - Optimisation pour déploiement post-Kafka
-# v1.0.0 - Version initiale basique (non fonctionnelle)
+# v4.0.0 - Refactorisation majeure: utilisation binaires Kafka existants
+#        - Suppression installation redondante ZooKeeper
+#        - Configuration basée sur /opt/kafka/config/zookeeper.properties
+#        - Service systemd pointant vers binaires Kafka
+#        - Conservation sécurité bancaire et normes ANSSI
+# v3.0.0 - Refactorisation complète selon méthode Basher Pro (obsolète)
+# v1.0.0 - Version initiale basique (obsolète)
 ################################################################################
 
 # === CONFIGURATION BASHER PRO ===
 set -euo pipefail
 trap 'echo "ERROR: Ligne $LINENO. Code de sortie: $?" >&2' ERR
 
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="4.0.0"
 SCRIPT_NAME="$(basename "$0")"
-LOG_FILE="/var/log/zookeeper-install-$(date +%Y%m%d-%H%M%S).log"
-ZK_VERSION="3.8.4"
+LOG_FILE="/var/log/zookeeper-config-$(date +%Y%m%d-%H%M%S).log"
 
 # === CONFIGURATION CLUSTER NODES (HÉRITAGE KAFKA) ===
 # Cette configuration doit être cohérente avec install_kafka_cluster.sh
@@ -38,19 +43,19 @@ declare -A ZK_NODES_DEFAULT=(
     [3]="172.20.2.115"
 )
 
-# === CONFIGURATION PATHS ET VARIABLES ===
-ZK_HOME="/opt/zookeeper"
-ZK_USER="zookeeper"
-ZK_GROUP="zookeeper"
+# === CONFIGURATION PATHS (UTILISATION BINAIRES KAFKA) ===
+KAFKA_HOME="/opt/kafka"
+ZK_USER="kafka"
+ZK_GROUP="kafka"
 ZK_DATA_DIR="/data/zookeeper"
 ZK_LOGS_DIR="/var/log/zookeeper"
+KAFKA_DIR="/opt/kafka"
 JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
 ZK_HEAP_SIZE="1g"
+ZK_CONFIG_FILE="$KAFKA_HOME/config/zookeeper.properties"
 
 # === VARIABLES GLOBALES ===
 NODE_ID=""
-REPO_SERVER="172.20.2.109"
-REPO_SERVER_BASEURL="/repos"
 DRY_RUN="false"
 CHECK_FS_ONLY="false"
 SKIP_VALIDATION="false"
@@ -71,6 +76,9 @@ error_exit() {
 load_zk_nodes_configuration() {
     log "Chargement configuration ZK_NODES..."
     
+    # Déclaration du tableau associatif ZK_NODES
+    declare -gA ZK_NODES
+    
     # Vérification variable système KAFKA_NODES (prioritaire pour cohérence)
     if [[ -n "${KAFKA_NODES:-}" ]]; then
         log "Variable système KAFKA_NODES détectée: $KAFKA_NODES"
@@ -78,90 +86,101 @@ load_zk_nodes_configuration() {
         
         # Parse du format "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
         if [[ "$KAFKA_NODES" =~ ^[0-9]+:[0-9.]+([,][0-9]+:[0-9.]+)*$ ]]; then
-            declare -A ZK_NODES_RUNTIME
-            
-            IFS=',' read -ra NODE_PAIRS <<< "$KAFKA_NODES"
-            for pair in "${NODE_PAIRS[@]}"; do
-                IFS=':' read -ra NODE_INFO <<< "$pair"
-                local node_id="${NODE_INFO[0]}"
-                local node_ip="${NODE_INFO[1]}"
-                
-                if [[ "$node_id" =~ ^[1-9][0-9]*$ ]] && [[ "$node_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                    ZK_NODES_RUNTIME[$node_id]="$node_ip"
-                    log "  Nœud ZooKeeper $node_id: $node_ip (hérité de KAFKA_NODES)"
-                fi
+            IFS=',' read -ra pairs <<< "$KAFKA_NODES"
+            for pair in "${pairs[@]}"; do
+                IFS=':' read -r id ip <<< "$pair"
+                ZK_NODES[$id]="$ip"
+                log "Nœud $id: $ip (depuis KAFKA_NODES)"
             done
-            
-            # Validation cohérence cluster (3 nœuds requis)
-            if [[ "${#ZK_NODES_RUNTIME[@]}" -ne 3 ]]; then
-                error_exit "Configuration KAFKA_NODES invalide pour ZooKeeper. Attendu: 3, Trouvé: ${#ZK_NODES_RUNTIME[@]}"
-            fi
-            
-            # Copie vers le tableau principal
-            declare -gA ZK_NODES
-            for key in "${!ZK_NODES_RUNTIME[@]}"; do
-                ZK_NODES[$key]="${ZK_NODES_RUNTIME[$key]}"
-            done
-            
         else
-            error_exit "Variable système KAFKA_NODES format invalide. Format: '1:172.20.2.113,2:172.20.2.114,3:172.20.2.115'"
+            error_exit "Format KAFKA_NODES invalide: $KAFKA_NODES (attendu: 1:IP,2:IP,3:IP)"
         fi
-        
     else
-        log "Variable système KAFKA_NODES non définie"
-        log "Source de configuration: Configuration par défaut ZooKeeper"
-        
-        # Utilisation de la configuration par défaut
-        declare -gA ZK_NODES
-        for key in "${!ZK_NODES_DEFAULT[@]}"; do
-            ZK_NODES[$key]="${ZK_NODES_DEFAULT[$key]}"
+        # Configuration par défaut
+        log "Variable KAFKA_NODES non définie, utilisation configuration par défaut"
+        for id in "${!ZK_NODES_DEFAULT[@]}"; do
+            ZK_NODES[$id]="${ZK_NODES_DEFAULT[$id]}"
+            log "Nœud $id: ${ZK_NODES_DEFAULT[$id]} (défaut)"
         done
     fi
     
-    # Validation de la configuration finale
-    log "Configuration ZK_NODES finale :"
-    for node_id in $(printf '%s\n' "${!ZK_NODES[@]}" | sort -n); do
-        log "  Nœud ZooKeeper $node_id: ${ZK_NODES[$node_id]}"
-    done
+    # Validation configuration
+    if [[ ${#ZK_NODES[@]} -lt 3 ]]; then
+        error_exit "Configuration ZK_NODES insuffisante: ${#ZK_NODES[@]} nœuds (minimum 3 requis)"
+    fi
+    
+    log "Configuration ZK_NODES chargée: ${#ZK_NODES[@]} nœuds"
 }
 
-# === FONCTION VALIDATION INTERACTIVE ZK_NODES ===
+# === VÉRIFICATION PRÉREQUIS KAFKA ===
+validate_kafka_prerequisites() {
+    log "Vérification prérequis Kafka..."
+    
+    # Vérification installation Kafka
+    if [[ ! -d "$KAFKA_HOME" ]]; then
+        error_exit "Kafka non installé: répertoire $KAFKA_HOME manquant"
+    fi
+    
+    if [[ ! -f "$KAFKA_HOME/bin/kafka-run-class.sh" ]]; then
+        error_exit "Binaires Kafka manquants: $KAFKA_HOME/bin/kafka-run-class.sh"
+    fi
+    
+    if [[ ! -f "$ZK_CONFIG_FILE" ]]; then
+        error_exit "Configuration ZooKeeper manquante: $ZK_CONFIG_FILE"
+    fi
+    
+    # Vérification binaires ZooKeeper dans Kafka
+    local zk_binaries=(
+        "$KAFKA_HOME/bin/zookeeper-server-start.sh"
+        "$KAFKA_HOME/bin/zookeeper-server-stop.sh"
+        "$KAFKA_HOME/bin/zookeeper-shell.sh"
+    )
+    
+    for binary in "${zk_binaries[@]}"; do
+        if [[ ! -f "$binary" ]]; then
+            error_exit "Binaire ZooKeeper manquant: $binary"
+        fi
+    done
+    
+    # Vérification utilisateur Kafka
+    if ! id kafka &>/dev/null; then
+        error_exit "Utilisateur kafka manquant (requis pour cohérence permissions)"
+    fi
+    
+    log "✓ Prérequis Kafka validés"
+}
+
+# === VALIDATION INTERACTIVE ===
 validate_zk_nodes_interactive() {
-    local -A nodes_to_validate
-    
-    # Copie du tableau à valider
-    for key in "${!ZK_NODES[@]}"; do
-        nodes_to_validate[$key]="${ZK_NODES[$key]}"
+    echo ""
+    echo "=== VALIDATION CONFIGURATION ZOOKEEPER ==="
+    echo "Version du script: $SCRIPT_VERSION"
+    echo "Mode: Configuration depuis binaires Kafka existants"
+    echo ""
+    echo "CONFIGURATION CLUSTER:"
+    for node_id in $(printf '%s\n' "${!ZK_NODES[@]}" | sort -n); do
+        echo "  Nœud ZooKeeper $node_id: ${ZK_NODES[$node_id]}:2181"
     done
-    
     echo ""
-    echo "=========================================================================="
-    echo "                   VALIDATION CONFIGURATION ZK_NODES"
-    echo "=========================================================================="
+    echo "NŒUD CIBLE: $NODE_ID (${ZK_NODES[$NODE_ID]})"
     echo ""
-    echo "Configuration actuelle des nœuds du cluster ZooKeeper :"
+    echo "RÉPERTOIRES:"
+    echo "  Binaires ZooKeeper: $KAFKA_HOME/bin/"
+    echo "  Configuration: $ZK_CONFIG_FILE"
+    echo "  Données: $ZK_DATA_DIR"
+    echo "  Logs: $ZK_LOGS_DIR"
     echo ""
+    echo "PRÉREQUIS VÉRIFIÉS:"
+    echo "  ✓ Installation Kafka: $KAFKA_HOME"
+    echo "  ✓ Binaires ZooKeeper inclus dans Kafka"
+    echo "  ✓ Configuration de base: $ZK_CONFIG_FILE"
     
-    # Affichage formaté du tableau
-    printf "%-10s %-15s %-30s\n" "NODE ID" "IP ADDRESS" "DESCRIPTION"
-    printf "%-10s %-15s %-30s\n" "-------" "----------" "-----------"
-    
-    for node_id in $(printf '%s\n' "${!nodes_to_validate[@]}" | sort -n); do
-        local ip="${nodes_to_validate[$node_id]}"
-        local description="Nœud ZooKeeper $node_id"
-        printf "%-10s %-15s %-30s\n" "$node_id" "$ip" "$description"
-    done
-    
-    echo ""
-    echo "Ports ZooKeeper: 2181 (client), 2888 (peer), 3888 (election)"
-    echo "Repository     : $REPO_SERVER"
-    echo "Prérequis      : install_kafka_cluster.sh exécuté avec succès"
-    echo ""
-    
-    # Vérification prérequis Kafka
-    if [[ ! -f "/etc/systemd/system/kafka.service" ]]; then
-        echo "⚠️  ATTENTION: Service Kafka non détecté!"
-        echo "   Le script install_kafka_cluster.sh doit être exécuté EN PREMIER"
+    # Vérification service Kafka
+    if [[ -f "/etc/systemd/system/kafka.service" ]]; then
+        echo "  ✓ Service Kafka configuré"
+    else
+        echo "  ⚠️  ATTENTION: Service Kafka non détecté!"
+        echo "     Le script install_kafka_cluster.sh doit être exécuté EN PREMIER"
         echo ""
     fi
     
@@ -175,7 +194,7 @@ validate_zk_nodes_interactive() {
                 break
                 ;;
             [nN]|[nN][oO][nN])
-                log "Installation annulée par l'utilisateur"
+                log "Configuration annulée par l'utilisateur"
                 exit 0
                 ;;
             *)
@@ -187,271 +206,6 @@ validate_zk_nodes_interactive() {
     echo ""
 }
 
-# === HELP FUNCTION ===
-show_help() {
-    cat << EOF
-$SCRIPT_NAME v$SCRIPT_VERSION - Installation ZooKeeper Cluster pour Kafka ACM
-
-USAGE:
-    $SCRIPT_NAME [OPTIONS]
-
-OPTIONS:
-    -h, --help              Afficher cette aide
-    -v, --version           Afficher la version
-    -n, --node-id NUM       ID du nœud ZooKeeper (1-3)
-    -r, --repo-server IP    IP du serveur repository (défaut: 172.20.2.109)
-    --dry-run              Mode test sans modification
-    --check-fs             Vérifier seulement les filesystems
-    --skip-validation      Ignorer la validation interactive (mode automatique)
-    --force-reinstall      Forcer la réinstallation même si déjà installé
-
-EXEMPLES:
-    $SCRIPT_NAME -n 1                    # Installation nœud ZooKeeper ID 1
-    $SCRIPT_NAME -n 2 -r 172.20.2.109    # Nœud 2 avec repo custom
-    $SCRIPT_NAME --check-fs              # Vérification filesystems seulement
-    $SCRIPT_NAME -n 1 --skip-validation  # Installation sans validation interactive
-
-CONFIGURATION ZK_NODES:
-    Le script supporte deux méthodes de configuration des nœuds :
-    
-    1. Configuration par défaut (dans le script) :
-       Node 1: ${ZK_NODES_DEFAULT[1]}
-       Node 2: ${ZK_NODES_DEFAULT[2]}
-       Node 3: ${ZK_NODES_DEFAULT[3]}
-    
-    2. Variable système KAFKA_NODES (prioritaire si définie) :
-       export KAFKA_NODES="1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
-       
-    La configuration ZooKeeper hérite automatiquement de KAFKA_NODES pour garantir
-    la cohérence du cluster.
-
-PRÉREQUIS CRITIQUES:
-    ⚠️  Le script install_kafka_cluster.sh DOIT être exécuté EN PREMIER
-    ⚠️  Java JDK 17 doit être installé (via install_kafka_cluster.sh)
-    ⚠️  Filesystem /data/zookeeper doit être monté
-
-CONFORMITÉ:
-    - PCI-DSS: Chiffrement, logs, permissions restrictives
-    - ANSSI-BP-028: SELinux, firewall, comptes de service
-    - Banking Standards: Haute disponibilité, monitoring, audit trail
-
-AUTEUR: Philippe.candido@emerging-it.fr
-EOF
-}
-
-# === VERSION FUNCTION ===
-show_version() {
-    echo "$SCRIPT_NAME version $SCRIPT_VERSION"
-    echo "ZooKeeper $ZK_VERSION"
-    echo "Support: RHEL 9, PCI-DSS, ANSSI-BP-028"
-    echo "Dépendance: install_kafka_cluster.sh (à exécuter en premier)"
-}
-
-# === PARSE ARGUMENTS ===
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        -v|--version)
-            show_version
-            exit 0
-            ;;
-        -n|--node-id)
-            NODE_ID="$2"
-            shift 2
-            ;;
-        -r|--repo-server)
-            REPO_SERVER="$2"
-            shift 2
-            ;;
-        --dry-run)
-            DRY_RUN="true"
-            shift
-            ;;
-        --check-fs)
-            CHECK_FS_ONLY="true"
-            shift
-            ;;
-        --skip-validation)
-            SKIP_VALIDATION="true"
-            shift
-            ;;
-        --force-reinstall)
-            FORCE_REINSTALL="true"
-            shift
-            ;;
-        *)
-            error_exit "Option inconnue: $1. Utilisez --help pour l'aide."
-            ;;
-    esac
-done
-
-# === VALIDATION ARGUMENTS ===
-if [[ -z "$NODE_ID" ]]; then
-    error_exit "ID nœud requis. Utilisez -n NUM (1-3)"
-fi
-
-if [[ ! "$NODE_ID" =~ ^[1-3]$ ]]; then
-    error_exit "ID nœud invalide: $NODE_ID. Valeurs acceptées: 1, 2, 3"
-fi
-
-# === VÉRIFICATION FILESYSTEM ZOOKEEPER ===
-check_zk_filesystem() {
-    log "Vérification filesystem pour ZooKeeper..."
-    
-    # Vérification montage $ZK_DATA_DIR
-    if ! mountpoint -q $ZK_DATA_DIR 2>/dev/null; then
-        # Tentative de création si n'existe pas
-        if [[ ! -d "$ZK_DATA_DIR" ]]; then
-            log "Création répertoire $ZK_DATA_DIR..."
-            mkdir -p "$ZK_DATA_DIR"
-        fi
-        log "ATTENTION: $ZK_DATA_DIR n'est pas un point de montage dédié"
-    fi
-    
-    # Vérification espace libre (minimum 5GB pour ZooKeeper)
-    local available_space=$(df $ZK_DATA_DIR | tail -1 | awk '{print $4}')
-    local min_space_kb=$((1 * 1024 * 1024))  # 1GB en KB
-    
-    if [[ "$available_space" -lt "$min_space_kb" ]]; then
-        error_exit "Espace insuffisant sur $ZK_DATA_DIR: ${available_space}KB disponible, ${min_space_kb}KB requis"
-    fi
-    
-    log "✓ Filesystem $ZK_DATA_DIR: ${available_space}KB disponible"
-    
-    # Vérification permissions et montage /var/log
-    if [[ ! -d "$ZK_LOGS_DIR" ]] || [[ ! -w "$ZK_LOGS_DIR" ]]; then
-        log "Création répertoire $ZK_LOGS_DIR..."
-        mkdir -p "$ZK_LOGS_DIR"
-    fi
-    
-    log "✓ Répertoire $ZK_LOGS_DIR accessible"
-    log "✓ Validation filesystem terminée avec succès"
-}
-
-# === VALIDATION PRÉREQUIS ===
-validate_prerequisites() {
-    log "Validation des prérequis système..."
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Validation prérequis simulée"
-        return
-    fi
-    
-    # Vérification CRITIQUE: Kafka doit être installé EN PREMIER
-    if [[ ! -f "/etc/systemd/system/kafka.service" ]]; then
-        error_exit "PRÉREQUIS MANQUANT: Le script install_kafka_cluster.sh doit être exécuté EN PREMIER!"
-    fi
-    
-    if [[ ! -d "/opt/kafka" ]]; then
-        error_exit "PRÉREQUIS MANQUANT: Kafka non installé. Exécutez install_kafka_cluster.sh d'abord."
-    fi
-    
-    log "✓ Prérequis Kafka validé: installation détectée"
-    
-    # Vérification Java (devrait être installé par install_kafka_cluster.sh)
-    if [[ ! -f "$JAVA_HOME/bin/java" ]]; then
-        error_exit "Java JDK 17 non trouvé dans $JAVA_HOME. Réexécutez install_kafka_cluster.sh."
-    fi
-    
-    local java_version=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1)
-    log "✓ Java détecté: $java_version"
-    
-    # Vérifications système standard
-    if [[ ! -f /etc/redhat-release ]] || ! grep -q "Red Hat Enterprise Linux.*9\." /etc/redhat-release; then
-        error_exit "OS non supporté. RHEL 9 requis."
-    fi
-    
-    if [[ "$(uname -m)" != "x86_64" ]]; then
-        error_exit "Architecture non supportée: $(uname -m). x86_64 requis."
-    fi
-    
-    if [[ "$EUID" -ne 0 ]]; then
-        error_exit "Privilèges root requis pour l'installation"
-    fi
-    
-    # Vérification mémoire (minimum 2GB pour ZooKeeper)
-    local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local min_mem_kb=$((2 * 1024 * 1024))
-    if [[ "$mem_kb" -lt "$min_mem_kb" ]]; then
-        error_exit "Mémoire insuffisante: ${mem_kb}KB disponible, ${min_mem_kb}KB requis"
-    fi
-    
-    # Vérification filesystem
-    check_zk_filesystem
-    
-    log "✓ Prérequis système validés"
-}
-
-# === VÉRIFICATION INSTALLATION EXISTANTE ===
-check_existing_installation() {
-    log "Vérification installation ZooKeeper existante..."
-    
-    if [[ -f "/etc/systemd/system/zookeeper.service" ]] && [[ "$FORCE_REINSTALL" != "true" ]]; then
-        log "Installation ZooKeeper existante détectée"
-        
-        if systemctl is-active --quiet zookeeper; then
-            log "Service ZooKeeper actif - arrêt requis pour réinstallation"
-            if [[ "$DRY_RUN" != "true" ]]; then
-                systemctl stop zookeeper
-                log "Service ZooKeeper arrêté"
-            fi
-        fi
-        
-        log "Mode mise à jour: préservation configuration existante"
-        return 0
-    fi
-    
-    if [[ -d "$ZK_HOME" ]] && [[ "$FORCE_REINSTALL" == "true" ]]; then
-        log "Force réinstallation activée - suppression installation existante"
-        if [[ "$DRY_RUN" != "true" ]]; then
-            systemctl stop zookeeper 2>/dev/null || true
-            systemctl disable zookeeper 2>/dev/null || true
-            rm -rf "$ZK_HOME"
-            log "Installation existante supprimée"
-        fi
-    fi
-    
-    log "✓ Vérification installation existante terminée"
-}
-
-# === CONFIGURATION REPOSITORY YUM (HÉRITAGE KAFKA) ===
-configure_yum_repository() {
-    log "Vérification repository YUM (héritage Kafka)..."
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Configuration repository simulée"
-        return
-    fi
-    
-    # Vérification repository configuré par install_kafka_cluster.sh
-    if [[ ! -f "/etc/yum.repos.d/java-local.repo" ]]; then
-        log "ATTENTION: Repository Java non configuré - configuration manuelle..."
-        
-        cat > /etc/yum.repos.d/java-local.repo << EOF
-[java-local]
-name=Java Local Repository  
-baseurl=http://$REPO_SERVER/$REPO_SERVER_BASEURL/java/
-enabled=1
-gpgcheck=0
-priority=1
-EOF
-        log "Repository Java configuré"
-    else
-        log "✓ Repository Java déjà configuré (héritage Kafka)"
-    fi
-    
-    # Test connectivité repository pour ZooKeeper
-    if ! curl -f -s -k "http://$REPO_SERVER/$REPO_SERVER_BASEURL/zookeeper/" > /dev/null; then
-        log "ATTENTION: Repository ZooKeeper non accessible: http://$REPO_SERVER/$REPO_SERVER_BASEURL/zookeeper/"
-        log "Tentative utilisation repository Kafka pour ZooKeeper..."
-    fi
-    
-    log "✓ Configuration repository validée"
-}
-
 # === CONFIGURATION SYSTÈME ===
 configure_system() {
     log "Configuration système pour ZooKeeper..."
@@ -461,21 +215,24 @@ configure_system() {
         return
     fi
     
-    # Création utilisateur zookeeper
+    # Création utilisateur zookeeper (séparé de kafka pour sécurité)
     if ! id "$ZK_USER" &>/dev/null; then
-        useradd -r -s /sbin/nologin -d "$ZK_HOME" "$ZK_USER"
+        useradd -r -s /sbin/nologin -d "$ZK_DATA_DIR" "$ZK_USER"
         log "Utilisateur $ZK_USER créé"
     else
         log "✓ Utilisateur $ZK_USER déjà existant"
     fi
     
     # Création des répertoires avec permissions sécurisées
-    local directories=("$ZK_HOME" "$ZK_DATA_DIR" "$ZK_LOGS_DIR")
+    local directories=("$ZK_DATA_DIR" "$ZK_LOGS_DIR" "$KAFKA_DIR/logs")
     for dir in "${directories[@]}"; do
         mkdir -p "$dir"
         chown "$ZK_USER:$ZK_GROUP" "$dir"
         chmod 750 "$dir"
     done
+    
+    # Permissions lecture sur binaires Kafka pour utilisateur zookeeper
+    usermod -a -G kafka "$ZK_USER"
     
     # Configuration limits système pour ZooKeeper
     if [[ ! -f "/etc/security/limits.d/zookeeper.conf" ]]; then
@@ -494,51 +251,6 @@ EOF
     log "Configuration système appliquée"
 }
 
-# === INSTALLATION ZOOKEEPER ===
-install_zookeeper() {
-    log "Installation ZooKeeper $ZK_VERSION depuis repository local..."
-    log "URL Archive : http://$REPO_SERVER/$REPO_SERVER_BASEURL/zookeeper/apache-zookeeper-${ZK_VERSION}-bin.tar.gz"
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Installation ZooKeeper simulée"
-        return
-    fi
-    
-    cd /tmp
-    
-    # Tentative téléchargement depuis repository zookeeper dédié
-    if curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/zookeeper/apache-zookeeper-${ZK_VERSION}-bin.tar.gz" -o "apache-zookeeper-${ZK_VERSION}-bin.tar.gz" 2>/dev/null; then
-        log "✓ Téléchargement depuis repository ZooKeeper dédié"
-    # Fallback: repository kafka (comme version originale)
-    elif curl -f "http://$REPO_SERVER/kafka/apache-zookeeper-${ZK_VERSION}-bin.tar.gz" -o "apache-zookeeper-${ZK_VERSION}-bin.tar.gz" 2>/dev/null; then
-        log "✓ Téléchargement depuis repository Kafka (fallback)"
-    else
-        error_exit "Échec téléchargement ZooKeeper depuis $REPO_SERVER"
-    fi
-    
-    # Vérification checksum si disponible
-    if curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/zookeeper/apache-zookeeper-${ZK_VERSION}-bin.tar.gz.sha512" -o "apache-zookeeper-${ZK_VERSION}-bin.tar.gz.sha512" 2>/dev/null; then
-        if sha512sum -c "apache-zookeeper-${ZK_VERSION}-bin.tar.gz.sha512"; then
-            log "✓ Checksum validé avec succès"
-        else
-            error_exit "Échec validation checksum ZooKeeper"
-        fi
-    else
-        log "ATTENTION: Pas de checksum disponible, procédure sans validation"
-    fi
-    
-    # Extraction et installation
-    tar -xzf "apache-zookeeper-${ZK_VERSION}-bin.tar.gz"
-    cp -r "apache-zookeeper-${ZK_VERSION}-bin"/* "$ZK_HOME/"
-    
-    # Permissions de sécurité strictes (Banking Standards)
-    chown -R "$ZK_USER:$ZK_GROUP" "$ZK_HOME"
-    chmod -R 750 "$ZK_HOME"
-    chmod 755 "$ZK_HOME/bin"/*.sh
-    
-    log "ZooKeeper installé dans $ZK_HOME"
-}
-
 # === CONFIGURATION ZOOKEEPER ===
 configure_zookeeper() {
     log "Configuration ZooKeeper node ID $NODE_ID..."
@@ -548,12 +260,19 @@ configure_zookeeper() {
         return
     fi
     
-    # Configuration zoo.cfg avec variables
-    cat > "$ZK_HOME/conf/zoo.cfg" << EOF
+    # Sauvegarde configuration originale Kafka
+    if [[ ! -f "$ZK_CONFIG_FILE.kafka-original" ]]; then
+        cp "$ZK_CONFIG_FILE" "$ZK_CONFIG_FILE.kafka-original"
+        log "Sauvegarde configuration originale: $ZK_CONFIG_FILE.kafka-original"
+    fi
+    
+    # Configuration zoo.cfg avec variables pour cluster bancaire
+    cat > "$ZK_CONFIG_FILE" << EOF
 # === CONFIGURATION ZOOKEEPER CLUSTER BANCAIRE ===
 # Generated by $SCRIPT_NAME v$SCRIPT_VERSION
 # Date: $(date)
 # Conformité: PCI-DSS, ANSSI-BP-028
+# Source: Configuration depuis binaires Kafka
 
 # === CONFIGURATION DE BASE ===
 tickTime=2000
@@ -581,43 +300,21 @@ EOF
 
     # Ajout des serveurs du cluster
     for node_id in $(printf '%s\n' "${!ZK_NODES[@]}" | sort -n); do
-        echo "server.$node_id=${ZK_NODES[$node_id]}:2888:3888" >> "$ZK_HOME/conf/zoo.cfg"
-        log "Ajout serveur $node_id: ${ZK_NODES[$node_id]}:2888:3888"
+        echo "server.$node_id=${ZK_NODES[$node_id]}:2888:3888" >> "$ZK_CONFIG_FILE"
+        log "Ajout serveur cluster: server.$node_id=${ZK_NODES[$node_id]}:2888:3888"
     done
     
-    # Configuration myid
+    # Création fichier myid
     echo "$NODE_ID" > "$ZK_DATA_DIR/myid"
     chown "$ZK_USER:$ZK_GROUP" "$ZK_DATA_DIR/myid"
     chmod 640 "$ZK_DATA_DIR/myid"
+    log "Fichier myid créé: $ZK_DATA_DIR/myid (contenu: $NODE_ID)"
     
-    # Configuration log4j pour compliance Banking
-    cat > "$ZK_HOME/conf/log4j.properties" << EOF
-# === CONFIGURATION LOGGING ZOOKEEPER BANCAIRE ===
-# Root logger
-zookeeper.root.logger=INFO, CONSOLE, ROLLINGFILE
-
-# Console appender
-zookeeper.console.threshold=INFO
-log4j.appender.CONSOLE=org.apache.log4j.ConsoleAppender
-log4j.appender.CONSOLE.Threshold=\${zookeeper.console.threshold}
-log4j.appender.CONSOLE.layout=org.apache.log4j.PatternLayout
-log4j.appender.CONSOLE.layout.ConversionPattern=%d{ISO8601} [myid:%X{myid}] - %-5p [%t:%C{1}@%L] - %m%n
-
-# File appender avec rotation (Banking Requirements)
-log4j.appender.ROLLINGFILE=org.apache.log4j.RollingFileAppender
-log4j.appender.ROLLINGFILE.Threshold=INFO
-log4j.appender.ROLLINGFILE.File=$ZK_LOGS_DIR/zookeeper.log
-log4j.appender.ROLLINGFILE.MaxFileSize=100MB
-log4j.appender.ROLLINGFILE.MaxBackupIndex=10
-log4j.appender.ROLLINGFILE.layout=org.apache.log4j.PatternLayout
-log4j.appender.ROLLINGFILE.layout.ConversionPattern=%d{ISO8601} [myid:%X{myid}] - %-5p [%t:%C{1}@%L] - %m%n
-
-# Suppression logs sensibles pour conformité PCI-DSS
-log4j.logger.org.apache.zookeeper.server.auth=ERROR
-log4j.logger.org.apache.zookeeper.server.quorum.QuorumCnxManager=WARN
-EOF
+    # Permissions sécurisées sur configuration
+    chown kafka:kafka "$ZK_CONFIG_FILE"
+    chmod 640 "$ZK_CONFIG_FILE"
     
-    log "Configuration ZooKeeper générée pour nœud $NODE_ID"
+    log "Configuration ZooKeeper appliquée"
 }
 
 # === CONFIGURATION SELINUX ===
@@ -629,139 +326,85 @@ configure_selinux() {
         return
     fi
     
-    # Vérification SELinux actif
+    # Vérification statut SELinux
     if ! command -v getenforce &> /dev/null || [[ "$(getenforce)" == "Disabled" ]]; then
-        log "SELinux désactivé - skipping configuration"
+        log "SELinux désactivé ou non installé, configuration ignorée"
         return
     fi
     
-    # Configuration ports ZooKeeper
-    semanage port -a -t http_port_t -p tcp 2181 2>/dev/null || \
-    semanage port -m -t http_port_t -p tcp 2181
+    # Contextes SELinux pour répertoires ZooKeeper
+    local selinux_contexts=(
+        "$ZK_DATA_DIR:admin_home_t"
+        "$ZK_LOGS_DIR:admin_home_t"
+    )
     
-    semanage port -a -t http_port_t -p tcp 2888 2>/dev/null || \
-    semanage port -m -t http_port_t -p tcp 2888
+    for context_def in "${selinux_contexts[@]}"; do
+        IFS=':' read -r path context <<< "$context_def"
+        if [[ -d "$path" ]]; then
+            semanage fcontext -a -t "$context" "$path(/.*)?" 2>/dev/null || true
+            restorecon -R "$path"
+            log "Contexte SELinux appliqué: $path -> $context"
+        fi
+    done
     
-    semanage port -a -t http_port_t -p tcp 3888 2>/dev/null || \
-    semanage port -m -t http_port_t -p tcp 3888
-    
-    # Contextes pour répertoires ZooKeeper
-    semanage fcontext -a -t admin_home_t "$ZK_HOME(/.*)?" 2>/dev/null || \
-    semanage fcontext -m -t admin_home_t "$ZK_HOME(/.*)?"
-    
-    semanage fcontext -a -t var_log_t "$ZK_LOGS_DIR(/.*)?" 2>/dev/null || \
-    semanage fcontext -m -t var_log_t "$ZK_LOGS_DIR(/.*)?"
-    
-    semanage fcontext -a -t admin_home_t "$ZK_DATA_DIR(/.*)?" 2>/dev/null || \
-    semanage fcontext -m -t admin_home_t "$ZK_DATA_DIR(/.*)?"
-    
-    # Application des contextes
-    restorecon -R "$ZK_HOME" "$ZK_LOGS_DIR" "$ZK_DATA_DIR"
+    # Politique SELinux pour ports ZooKeeper
+    local zk_ports=("2181" "2888" "3888")
+    for port in "${zk_ports[@]}"; do
+        if ! semanage port -l | grep -q "$port/tcp.*zookeeper_client_port_t"; then
+            semanage port -a -t zookeeper_client_port_t -p tcp "$port" 2>/dev/null || true
+            log "Port SELinux configuré: $port/tcp"
+        fi
+    done
     
     log "Configuration SELinux appliquée"
 }
 
 # === CONFIGURATION FIREWALL ===
 configure_firewall() {
-    log "Configuration firewall pour ports ZooKeeper..."
+    log "Configuration firewall pour ZooKeeper..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Configuration firewall simulée"
         return
     fi
     
-    # Vérification si firewalld est installé et actif
+    # Vérification firewalld
     if ! command -v firewall-cmd &> /dev/null; then
-        log "ATTENTION: firewall-cmd non disponible - skip configuration firewall"
+        log "Firewalld non installé, configuration ignorée"
         return
     fi
     
     if ! systemctl is-active --quiet firewalld; then
-        log "ATTENTION: firewalld non actif - skip configuration firewall"
+        log "Firewalld inactif, configuration ignorée"
         return
     fi
     
-    # Sauvegarde de la configuration firewall actuelle
-    local backup_file="/tmp/firewall-backup-zk-$(date +%Y%m%d-%H%M%S).xml"
-    firewall-cmd --get-active-zones > "$backup_file" 2>/dev/null || true
-    log "Sauvegarde firewall créée: $backup_file"
-    
-    # Configuration des règles permanentes pour ZooKeeper
+    # Ouverture ports ZooKeeper
     local zk_ports=("2181" "2888" "3888")
-    local zk_descriptions=("Client" "Peer" "Election")
-    
-    for i in "${!zk_ports[@]}"; do
-        local port="${zk_ports[$i]}"
-        local desc="${zk_descriptions[$i]}"
-        
-        log "Ajout règle firewall permanente TCP/$port (ZooKeeper $desc)..."
-        if firewall-cmd --permanent --add-port="$port/tcp"; then
-            log "✓ Règle TCP/$port (ZooKeeper $desc) ajoutée avec succès"
+    for port in "${zk_ports[@]}"; do
+        if ! firewall-cmd --query-port="$port/tcp" &>/dev/null; then
+            firewall-cmd --permanent --add-port="$port/tcp"
+            log "Port firewall ouvert: $port/tcp"
         else
-            log "ATTENTION: Échec ajout règle TCP/$port, peut déjà exister"
-        fi
-        
-        # Configuration des règles actives (runtime)
-        if firewall-cmd --add-port="$port/tcp"; then
-            log "✓ Règle runtime TCP/$port (ZooKeeper $desc) activée"
-        else
-            log "ATTENTION: Échec activation runtime TCP/$port"
+            log "✓ Port firewall déjà ouvert: $port/tcp"
         fi
     done
     
-    # Rechargement de la configuration permanente
-    log "Rechargement configuration firewall permanente..."
-    if firewall-cmd --reload; then
-        log "✓ Configuration firewall rechargée avec succès"
-    else
-        error_exit "Échec rechargement configuration firewall"
-    fi
-    
-    # Vérification des règles appliquées
-    log "Vérification des règles firewall appliquées:"
-    
-    for i in "${!zk_ports[@]}"; do
-        local port="${zk_ports[$i]}"
-        local desc="${zk_descriptions[$i]}"
-        
-        if firewall-cmd --query-port="$port/tcp" &>/dev/null; then
-            log "✓ Port TCP/$port (ZooKeeper $desc) autorisé"
-        else
-            log "⚠ Port TCP/$port (ZooKeeper $desc) NON autorisé"
-        fi
-    done
-    
-    # Affichage résumé configuration firewall pour audit
-    log "=== RÉSUMÉ CONFIGURATION FIREWALL ZOOKEEPER ==="
-    log "Zone active: $(firewall-cmd --get-active-zones | head -1)"
-    log "Ports ouverts: $(firewall-cmd --list-ports | tr '\n' ' ')"
-    
-    # Conformité PCI-DSS : limitation accès réseau
-    log "CONFORMITÉ PCI-DSS: Vérification limitation accès réseau"
-    local zk_nodes_string=""
-    for node_id in "${!ZK_NODES[@]}"; do
-        if [[ -n "$zk_nodes_string" ]]; then
-            zk_nodes_string+=","
-        fi
-        zk_nodes_string+="${ZK_NODES[$node_id]}"
-    done
-    
-    log "Nœuds cluster autorisés: $zk_nodes_string"
-    log "Repository server: $REPO_SERVER"
-    
-    log "Configuration firewall ZooKeeper terminée avec succès"
+    # Application configuration
+    firewall-cmd --reload
+    log "Configuration firewall appliquée"
 }
 
 # === CRÉATION SERVICE SYSTEMD ===
 create_systemd_service() {
-    log "Création service systemd ZooKeeper..."
+    log "Création service systemd zookeeper..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Création service systemd simulée"
         return
     fi
     
-    # Service ZooKeeper avec configuration Banking
+    # Création service ZooKeeper utilisant binaires Kafka
     cat > /etc/systemd/system/zookeeper.service << EOF
 [Unit]
 Description=Apache ZooKeeper Server (Banking Cluster Node $NODE_ID)
@@ -775,11 +418,13 @@ Type=simple
 User=$ZK_USER
 Group=$ZK_GROUP
 Environment=JAVA_HOME=$JAVA_HOME
+Environment=KAFKA_HOME=$KAFKA_HOME
 Environment=ZOO_LOG_DIR=$ZK_LOGS_DIR
 Environment=ZOO_LOG4J_PROP=INFO,CONSOLE,ROLLINGFILE
 Environment=JVMFLAGS="-Xmx$ZK_HEAP_SIZE -Xms$ZK_HEAP_SIZE"
-ExecStart=$ZK_HOME/bin/zkServer.sh start-foreground
-ExecStop=$ZK_HOME/bin/zkServer.sh stop
+Environment=KAFKA_JVM_PERFORMANCE_OPTS="-Xlog:gc*:file=$ZK_LOGS_DIR/zookeeper-gc.log:time,tags:filecount=10,filesize=100M"
+ExecStart=$KAFKA_HOME/bin/zookeeper-server-start.sh $ZK_CONFIG_FILE
+ExecStop=$KAFKA_HOME/bin/zookeeper-server-stop.sh
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
@@ -793,8 +438,9 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=$ZK_DATA_DIR $ZK_LOGS_DIR
+ProtectSystem=full
+ReadWritePaths=$ZK_DATA_DIR $ZK_LOGS_DIR $KAFKA_DIR/logs
+ReadOnlyPaths=$KAFKA_HOME
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
@@ -810,18 +456,17 @@ EOF
 
 # === VALIDATION INSTALLATION ===
 validate_installation() {
-    log "Validation de l'installation..."
+    log "Validation de la configuration..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Validation installation simulée"
+        log "[DRY-RUN] Validation configuration simulée"
         return
     fi
     
     # Vérification fichiers critiques
     local required_files=(
-        "$ZK_HOME/bin/zkServer.sh"
-        "$ZK_HOME/conf/zoo.cfg"
-        "$ZK_HOME/conf/log4j.properties"
+        "$KAFKA_HOME/bin/zookeeper-server-start.sh"
+        "$ZK_CONFIG_FILE"
         "$ZK_DATA_DIR/myid"
         "/etc/systemd/system/zookeeper.service"
     )
@@ -833,8 +478,8 @@ validate_installation() {
     done
     
     # Vérification permissions
-    if [[ "$(stat -c %U:%G "$ZK_HOME")" != "$ZK_USER:$ZK_GROUP" ]]; then
-        error_exit "Permissions incorrectes sur $ZK_HOME"
+    if [[ "$(stat -c %U:%G "$ZK_DATA_DIR")" != "$ZK_USER:$ZK_GROUP" ]]; then
+        error_exit "Permissions incorrectes sur $ZK_DATA_DIR"
     fi
     
     # Vérification contenu myid
@@ -848,32 +493,168 @@ validate_installation() {
         error_exit "Service zookeeper non activé"
     fi
     
-    # Vérification règles firewall (optionnelle si firewalld actif)
-    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
-        local zk_ports=("2181" "2888" "3888")
-        for port in "${zk_ports[@]}"; do
-            if ! firewall-cmd --query-port="$port/tcp" &>/dev/null; then
-                log "ATTENTION: Port TCP/$port (ZooKeeper) non autorisé par firewall"
-            fi
-        done
+    # Vérification configuration cluster dans zookeeper.properties
+    local cluster_servers=$(grep -c "^server\." "$ZK_CONFIG_FILE" || echo "0")
+    if [[ "$cluster_servers" -lt 3 ]]; then
+        error_exit "Configuration cluster insuffisante: $cluster_servers serveurs (minimum 3)"
     fi
     
-    log "✓ Validation installation réussie"
+    log "✓ Validation configuration réussie"
+}
+
+# === VÉRIFICATION FILESYSTEM ===
+check_zk_filesystem() {
+    log "Vérification filesystems ZooKeeper..."
+    
+    local fs_checks=(
+        "$ZK_DATA_DIR:5G:Données ZooKeeper"
+        "$ZK_LOGS_DIR:2G:Logs ZooKeeper"
+    )
+    
+    for fs_check in "${fs_checks[@]}"; do
+        IFS=':' read -r path min_size description <<< "$fs_check"
+        
+        if [[ ! -d "$path" ]]; then
+            log "⚠️  Répertoire manquant: $path ($description)"
+            continue
+        fi
+        
+        local available=$(df -BG "$path" | awk 'NR==2 {gsub(/G/, "", $4); print $4}')
+        local required=$(echo "$min_size" | sed 's/G//')
+        
+        if [[ "$available" -lt "$required" ]]; then
+            log "⚠️  Espace insuffisant: $path ($available G disponible, $min_size requis)"
+        else
+            log "✓ Filesystem OK: $path ($available G disponible)"
+        fi
+    done
+}
+
+# === PARSING ARGUMENTS ===
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                echo "$SCRIPT_NAME version $SCRIPT_VERSION"
+                exit 0
+                ;;
+            -n|--node-id)
+                NODE_ID="$2"
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN="true"
+                shift
+                ;;
+            --check-fs)
+                CHECK_FS_ONLY="true"
+                shift
+                ;;
+            --skip-validation)
+                SKIP_VALIDATION="true"
+                shift
+                ;;
+            --force-reinstall)
+                FORCE_REINSTALL="true"
+                shift
+                ;;
+            *)
+                error_exit "Option inconnue: $1"
+                ;;
+        esac
+    done
+    
+    # Validation NODE_ID obligatoire (sauf pour check-fs)
+    if [[ -z "$NODE_ID" && "$CHECK_FS_ONLY" != "true" ]]; then
+        error_exit "NODE_ID obligatoire (-n|--node-id)"
+    fi
+    
+    if [[ -n "$NODE_ID" && ! "$NODE_ID" =~ ^[1-3]$ ]]; then
+        error_exit "NODE_ID invalide: $NODE_ID (valeurs autorisées: 1, 2, 3)"
+    fi
+}
+
+# === HELP FUNCTION ===
+show_help() {
+    cat << EOF
+$SCRIPT_NAME v$SCRIPT_VERSION - Configuration ZooKeeper depuis binaires Kafka
+
+DESCRIPTION:
+    Ce script configure ZooKeeper en utilisant les binaires inclus dans Kafka.
+    Il ne télécharge PAS ZooKeeper séparément mais utilise l'installation Kafka existante.
+
+USAGE:
+    $SCRIPT_NAME [OPTIONS]
+
+OPTIONS:
+    -h, --help              Afficher cette aide
+    -v, --version           Afficher la version
+    -n, --node-id NUM       ID du nœud ZooKeeper (1-3)
+    --dry-run              Mode test sans modification
+    --check-fs             Vérifier seulement les filesystems
+    --skip-validation      Ignorer la validation interactive (mode automatique)
+    --force-reinstall      Forcer la reconfiguration même si déjà configuré
+
+EXEMPLES:
+    $SCRIPT_NAME -n 1                    # Configuration nœud ZooKeeper ID 1
+    $SCRIPT_NAME -n 2 --skip-validation  # Configuration automatique nœud 2
+    $SCRIPT_NAME --check-fs              # Vérification filesystems seulement
+    $SCRIPT_NAME -n 1 --dry-run          # Test configuration sans modification
+
+PRÉREQUIS:
+    ✓ Script install_kafka_cluster.sh exécuté avec succès
+    ✓ Kafka installé dans $KAFKA_HOME
+    ✓ Binaires ZooKeeper disponibles dans $KAFKA_HOME/bin/
+    ✓ Configuration de base dans $ZK_CONFIG_FILE
+
+CONFIGURATION ZK_NODES:
+    Le script supporte deux méthodes de configuration des nœuds :
+    
+    1. Configuration par défaut (dans le script) :
+       Node 1: ${ZK_NODES_DEFAULT[1]}
+       Node 2: ${ZK_NODES_DEFAULT[2]}
+       Node 3: ${ZK_NODES_DEFAULT[3]}
+    
+    2. Variable système KAFKA_NODES (prioritaire si définie) :
+       export KAFKA_NODES="1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
+       
+    La configuration ZooKeeper hérite automatiquement de KAFKA_NODES pour garantir
+    la cohérence du cluster.
+
+CHANGEMENTS v4.0.0:
+    - Utilisation des binaires ZooKeeper inclus dans Kafka
+    - Plus de téléchargement/installation séparée de ZooKeeper
+    - Configuration basée sur $ZK_CONFIG_FILE existant
+    - Service systemd utilisant $KAFKA_HOME/bin/zookeeper-server-start.sh
+    - Conservation de toutes les fonctionnalités de sécurité bancaire
+
+FICHIERS GÉNÉRÉS:
+    - $ZK_CONFIG_FILE (configuration cluster)
+    - $ZK_DATA_DIR/myid (identifiant nœud)
+    - /etc/systemd/system/zookeeper.service (service systemd)
+    - /etc/security/limits.d/zookeeper.conf (limites système)
+
+PORTS OUVERTS:
+    - 2181/tcp (client ZooKeeper)
+    - 2888/tcp (communication inter-nœuds)
+    - 3888/tcp (élection leader)
+EOF
 }
 
 # === FONCTION PRINCIPALE ===
 main() {
-    log "=== DÉBUT INSTALLATION ZOOKEEPER CLUSTER v$SCRIPT_VERSION ==="
+    log "=== DÉBUT CONFIGURATION ZOOKEEPER v$SCRIPT_VERSION ==="
+    log "Mode: Configuration depuis binaires Kafka existants"
+    
+    # Parse des arguments
+    parse_arguments "$@"
     
     # Chargement de la configuration ZK_NODES
     load_zk_nodes_configuration
-    
-    # Validation interactive (sauf si skip-validation)
-    if [[ "$SKIP_VALIDATION" != "true" && "$CHECK_FS_ONLY" != "true" && "$DRY_RUN" != "true" ]]; then
-        validate_zk_nodes_interactive
-    fi
-    
-    log "Nœud ZooKeeper: $NODE_ID (${ZK_NODES[$NODE_ID]}), Repository: $REPO_SERVER"
     
     # Mode vérification filesystem seulement
     if [[ "$CHECK_FS_ONLY" == "true" ]]; then
@@ -881,49 +662,54 @@ main() {
         exit 0
     fi
     
-    validate_prerequisites
-    check_existing_installation
-    configure_yum_repository
+    # Validation prérequis Kafka
+    validate_kafka_prerequisites
+    
+    # Validation interactive (sauf si skip-validation)
+    if [[ "$SKIP_VALIDATION" != "true" && "$DRY_RUN" != "true" ]]; then
+        validate_zk_nodes_interactive
+    fi
+    
+    log "Configuration nœud: $NODE_ID (${ZK_NODES[$NODE_ID]})"
+    log "Binaires ZooKeeper: $KAFKA_HOME/bin/"
+    
+    # Exécution des étapes de configuration
     configure_system
-    install_zookeeper
     configure_zookeeper
     configure_selinux
     configure_firewall
     create_systemd_service
     validate_installation
     
-    log "=== INSTALLATION ZOOKEEPER TERMINÉE ==="
-    log "ZooKeeper nœud $NODE_ID prêt à démarrer"
+    log "=== CONFIGURATION TERMINÉE ==="
+    log "ZooKeeper node $NODE_ID configuré depuis binaires Kafka"
     log ""
     log "PROCHAINES ÉTAPES:"
-    log "1. Démarrer ZooKeeper: systemctl start zookeeper"
-    log "2. Vérifier statut: systemctl status zookeeper"
-    log "3. Consulter logs: journalctl -u zookeeper -f"
-    log "4. Après démarrage de tous les nœuds ZooKeeper, démarrer Kafka"
+    log "1. Vérifier configuration: cat $ZK_CONFIG_FILE"
+    log "2. Démarrer ZooKeeper: systemctl start zookeeper"
+    log "3. Vérifier statut: systemctl status zookeeper"
+    log "4. Consulter logs: journalctl -u zookeeper -f"
     log ""
-    log "VALIDATION CLUSTER ZOOKEEPER:"
-    log "  echo ruok | nc localhost 2181"
+    log "VALIDATION CLUSTER:"
     log "  echo stat | nc localhost 2181"
-    log "  echo conf | nc localhost 2181"
+    log "  echo ruok | nc localhost 2181"
+    log "  $KAFKA_HOME/bin/zookeeper-shell.sh localhost:2181"
     log ""
-    log "VALIDATION CONNECTIVITÉ INTER-NŒUDS:"
-    for node_id in "${!ZK_NODES[@]}"; do
-        if [[ "$node_id" != "$NODE_ID" ]]; then
-            log "  telnet ${ZK_NODES[$node_id]} 2181"
-            log "  telnet ${ZK_NODES[$node_id]} 2888"
-            log "  telnet ${ZK_NODES[$node_id]} 3888"
-        fi
-    done
-    log ""
-    log "ORDRE DE DÉMARRAGE RECOMMANDÉ:"
-    log "1. Démarrer ZooKeeper sur tous les nœuds: systemctl start zookeeper"
-    log "2. Vérifier cluster ZooKeeper: echo stat | nc localhost 2181"
-    log "3. Démarrer Kafka sur tous les nœuds: systemctl start kafka"
+    log "VALIDATION RÉSEAU:"
+    log "  telnet ${ZK_NODES[1]} 2181"
+    log "  telnet ${ZK_NODES[2]} 2181" 
+    log "  telnet ${ZK_NODES[3]} 2181"
     log ""
     log "CONFIGURATION UTILISÉE:"
     for node_id in $(printf '%s\n' "${!ZK_NODES[@]}" | sort -n); do
-        log "  Nœud ZooKeeper $node_id: ${ZK_NODES[$node_id]}"
+        log "  Nœud $node_id: ${ZK_NODES[$node_id]}:2181"
     done
+    log ""
+    log "FICHIERS CONFIGURÉS:"
+    log "  Configuration: $ZK_CONFIG_FILE"
+    log "  Données: $ZK_DATA_DIR"
+    log "  Service: /etc/systemd/system/zookeeper.service"
+    log "  Sauvegarde: $ZK_CONFIG_FILE.kafka-original"
 }
 
 # === EXÉCUTION ===
