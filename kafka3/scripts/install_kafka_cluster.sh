@@ -438,7 +438,7 @@ install_java_rpm() {
 install_kafka() {
     log "Installation Kafka $KAFKA_VERSION depuis repository local..."
     log "URL Archive : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
-    log "URL Checksum : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"
+    log "URL Checksum : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
@@ -453,8 +453,8 @@ install_kafka() {
     fi
     
     # Vérification checksum si disponible
-    if curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"; then
-        if sha512sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"; then
+    if curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
+        if sha512sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
             log "✓ Checksum validé avec succès"
         else
             error_exit "Échec validation checksum Kafka"
