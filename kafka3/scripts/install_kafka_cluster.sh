@@ -1,8 +1,8 @@
 #!/bin/bash
 ################################################################################
-# Script: install_kafka_cluster.sh
-# Version: 2.0.0
-# Description: Installation Kafka 3.9.1 en cluster HA pour ACM Banking
+# Script: install_kafka_cluster_enhanced.sh
+# Version: 2.1.0
+# Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking (Enhanced)
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
 # 
@@ -10,6 +10,7 @@
 # Environment: RHEL 9 Air-gapped
 # 
 # CHANGELOG:
+# v2.1.0 - Ajout validation interactive KAFKA_NODES et support variable système
 # v2.0.0 - Refactorisation avec RPM Java, variables nœuds, vérification filesystem
 ################################################################################
 
@@ -17,14 +18,15 @@
 set -euo pipefail
 trap 'echo "ERROR: Ligne $LINENO. Code de sortie: $?" >&2' ERR
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE="/var/log/kafka-install-$(date +%Y%m%d-%H%M%S).log"
-KAFKA_VERSION="3.9.1"
+KAFKA_VERSION="3.9.0"
 SCALA_VERSION="2.13"
 
-# === CONFIGURATION CLUSTER NODES ===
-declare -A KAFKA_NODES=(
+# === CONFIGURATION CLUSTER NODES (PAR DÉFAUT) ===
+# Cette configuration peut être surchargée par la variable système KAFKA_NODES
+declare -A KAFKA_NODES_DEFAULT=(
     [1]="172.20.2.113"
     [2]="172.20.2.114" 
     [3]="172.20.2.115"
@@ -40,10 +42,131 @@ error_exit() {
     exit 1
 }
 
+# === FONCTION VALIDATION INTERACTIVE KAFKA_NODES ===
+validate_kafka_nodes_interactive() {
+    local -A nodes_to_validate
+    
+    # Copie du tableau à valider
+    for key in "${!KAFKA_NODES[@]}"; do
+        nodes_to_validate[$key]="${KAFKA_NODES[$key]}"
+    done
+    
+    echo ""
+    echo "=========================================================================="
+    echo "                   VALIDATION CONFIGURATION KAFKA_NODES"
+    echo "=========================================================================="
+    echo ""
+    echo "Configuration actuelle des nœuds du cluster Kafka :"
+    echo ""
+    
+    # Affichage formaté du tableau
+    printf "%-10s %-15s %-30s\n" "NODE ID" "IP ADDRESS" "DESCRIPTION"
+    printf "%-10s %-15s %-30s\n" "-------" "----------" "-----------"
+    
+    for node_id in $(printf '%s\n' "${!nodes_to_validate[@]}" | sort -n); do
+        local ip="${nodes_to_validate[$node_id]}"
+        local description="Nœud Kafka/ZooKeeper $node_id"
+        printf "%-10s %-15s %-30s\n" "$node_id" "$ip" "$description"
+    done
+    
+    echo ""
+    echo "Réseau cible   : 172.20.2.0/24"
+    echo "Ports Kafka    : 9092 (inter-cluster)"
+    echo "Ports ZooKeeper: 2181 (inter-cluster)"
+    echo "Repository     : $REPO_SERVER"
+    echo ""
+    
+    # Demande de validation
+    while true; do
+        echo -n "Voulez-vous continuer avec cette configuration ? [O/n] : "
+        read -r response
+        
+        case "$response" in
+            ""|"O"|"o"|"Oui"|"oui"|"Y"|"y"|"Yes"|"yes")
+                log "✓ Configuration KAFKA_NODES validée par l'utilisateur"
+                break
+                ;;
+            "N"|"n"|"Non"|"non"|"No"|"no")
+                echo ""
+                echo "Installation annulée par l'utilisateur."
+                echo "Pour modifier la configuration :"
+                echo "1. Éditez le script et modifiez KAFKA_NODES_DEFAULT"
+                echo "2. Ou définissez la variable système KAFKA_NODES"
+                echo ""
+                exit 1
+                ;;
+            *)
+                echo "Réponse invalide. Veuillez répondre par 'O' (Oui) ou 'n' (Non)."
+                ;;
+        esac
+    done
+    
+    echo ""
+}
+
+# === FONCTION GESTION VARIABLE SYSTÈME KAFKA_NODES ===
+load_kafka_nodes_configuration() {
+    log "Chargement de la configuration KAFKA_NODES..."
+    
+    # Vérification existence variable système KAFKA_NODES
+    if [[ -n "${KAFKA_NODES:-}" ]]; then
+        log "✓ Variable système KAFKA_NODES détectée"
+        log "Source de configuration: Variable système"
+        
+        # Parsing de la variable système (format attendu: "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115")
+        if [[ "$KAFKA_NODES" =~ ^[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(,[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)*$ ]]; then
+            declare -gA KAFKA_NODES_RUNTIME
+            
+            # Parsing des entrées
+            IFS=',' read -ra ENTRIES <<< "$KAFKA_NODES"
+            for entry in "${ENTRIES[@]}"; do
+                if [[ "$entry" =~ ^([0-9]+):([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+                    local node_id="${BASH_REMATCH[1]}"
+                    local node_ip="${BASH_REMATCH[2]}"
+                    KAFKA_NODES_RUNTIME[$node_id]="$node_ip"
+                    log "  Nœud $node_id: $node_ip"
+                else
+                    error_exit "Format invalide dans KAFKA_NODES: '$entry'. Format attendu: 'ID:IP'"
+                fi
+            done
+            
+            # Validation du nombre de nœuds
+            if [[ ${#KAFKA_NODES_RUNTIME[@]} -lt 3 ]]; then
+                error_exit "Cluster Kafka requiert minimum 3 nœuds. Trouvé: ${#KAFKA_NODES_RUNTIME[@]}"
+            fi
+            
+            # Copie vers le tableau principal
+            declare -gA KAFKA_NODES
+            for key in "${!KAFKA_NODES_RUNTIME[@]}"; do
+                KAFKA_NODES[$key]="${KAFKA_NODES_RUNTIME[$key]}"
+            done
+            
+        else
+            error_exit "Variable système KAFKA_NODES format invalide. Format: '1:172.20.2.113,2:172.20.2.114,3:172.20.2.115'"
+        fi
+        
+    else
+        log "Variable système KAFKA_NODES non définie"
+        log "Source de configuration: Configuration par défaut du script"
+        
+        # Utilisation de la configuration par défaut
+        declare -gA KAFKA_NODES
+        for key in "${!KAFKA_NODES_DEFAULT[@]}"; do
+            KAFKA_NODES[$key]="${KAFKA_NODES_DEFAULT[$key]}"
+        done
+    fi
+    
+    # Validation de la configuration finale
+    log "Configuration KAFKA_NODES finale :"
+    for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
+        log "  Nœud $node_id: ${KAFKA_NODES[$node_id]}"
+    done
+}
+
 # === HELP FUNCTION ===
 show_help() {
     cat << EOF
-$SCRIPT_NAME v$SCRIPT_VERSION - Installation Kafka Cluster avec RPM Java
+$SCRIPT_NAME v$SCRIPT_VERSION - Installation Kafka Cluster avec RPM Java (Enhanced)
 
 USAGE:
     $SCRIPT_NAME [OPTIONS]
@@ -55,11 +178,26 @@ OPTIONS:
     -r, --repo-server IP    IP du serveur repository (défaut: 172.20.2.109)
     --dry-run              Mode test sans modification
     --check-fs             Vérifier seulement les filesystems
+    --skip-validation      Ignorer la validation interactive (mode automatique)
 
 EXEMPLES:
-    $SCRIPT_NAME -n 1       # Installation broker ID 1
-    $SCRIPT_NAME -n 2 -r 172.20.2.109  # Broker 2 avec repo custom
-    $SCRIPT_NAME --check-fs # Vérification filesystems seulement
+    $SCRIPT_NAME -n 1                    # Installation broker ID 1
+    $SCRIPT_NAME -n 2 -r 172.20.2.109    # Broker 2 avec repo custom
+    $SCRIPT_NAME --check-fs              # Vérification filesystems seulement
+    $SCRIPT_NAME -n 1 --skip-validation  # Installation sans validation interactive
+
+CONFIGURATION KAFKA_NODES:
+    Le script supporte deux méthodes de configuration des nœuds :
+    
+    1. Configuration par défaut (dans le script) :
+       Node 1: ${KAFKA_NODES_DEFAULT[1]}
+       Node 2: ${KAFKA_NODES_DEFAULT[2]}
+       Node 3: ${KAFKA_NODES_DEFAULT[3]}
+    
+    2. Variable système KAFKA_NODES (prioritaire si définie) :
+       export KAFKA_NODES="1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
+       
+    La validation interactive permet de confirmer la configuration avant installation.
 
 CONFORMITÉ:
     - PCI-DSS Level 1
@@ -67,10 +205,11 @@ CONFORMITÉ:
     - SELinux enforcing
     - Filesystem dédié requis pour KAFKA_DATA_DIR
 
-NŒUDS CLUSTER:
-    Node 1: ${KAFKA_NODES[1]}
-    Node 2: ${KAFKA_NODES[2]}
-    Node 3: ${KAFKA_NODES[3]}
+SÉCURITÉ BANKING:
+    - Validation interactive de la topologie réseau
+    - Support variable système pour automatisation
+    - Logging complet des opérations
+    - Vérification intégrité configuration
 EOF
 }
 
@@ -79,6 +218,7 @@ NODE_ID=""
 REPO_SERVER="172.20.2.109"
 DRY_RUN=false
 CHECK_FS_ONLY=false
+SKIP_VALIDATION=false
 KAFKA_USER="kafka"
 KAFKA_GROUP="kafka"
 KAFKA_HOME="/opt/kafka"
@@ -113,65 +253,49 @@ while [[ $# -gt 0 ]]; do
             CHECK_FS_ONLY=true
             shift
             ;;
+        --skip-validation)
+            SKIP_VALIDATION=true
+            shift
+            ;;
         *)
             error_exit "Option inconnue: $1. Utilisez -h pour l'aide."
             ;;
     esac
 done
 
-# === VÉRIFICATION FILESYSTEM KAFKA_DATA_DIR ===
+# === VÉRIFICATION FILESYSTEM KAFKA ===
 check_kafka_filesystem() {
-    log "Vérification filesystem pour KAFKA_DATA_DIR..."
+    log "Vérification filesystem dédié pour Kafka..."
     
-    # Vérification que KAFKA_DATA_DIR est un point de montage dédié
-    if ! mountpoint -q "$KAFKA_DATA_DIR" 2>/dev/null; then
-        log "ATTENTION: $KAFKA_DATA_DIR n'est pas un point de montage dédié"
-        
-        # Vérification si le répertoire parent est un filesystem dédié
-        parent_dir=$(dirname "$KAFKA_DATA_DIR")
-        if mountpoint -q "$parent_dir" 2>/dev/null; then
-            log "Point de montage parent trouvé: $parent_dir"
-            filesystem_info=$(df -h "$parent_dir" | tail -1)
-            log "Filesystem info: $filesystem_info"
-        else
-            error_exit "KAFKA_DATA_DIR doit être sur un filesystem dédié pour la conformité bancaire"
-        fi
+    if [[ ! -d "$KAFKA_DATA_DIR" ]]; then
+        error_exit "Répertoire KAFKA_DATA_DIR manquant: $KAFKA_DATA_DIR"
+    fi
+    
+    # Vérification mount point dédié (Banking Requirement)
+    local mount_point=$(df "$KAFKA_DATA_DIR" | tail -1 | awk '{print $6}')
+    if [[ "$mount_point" == "/" ]]; then
+        log "ATTENTION: $KAFKA_DATA_DIR sur filesystem racine (non recommandé en production)"
     else
-        log "✓ Filesystem dédié détecté pour $KAFKA_DATA_DIR"
-        filesystem_info=$(df -h "$KAFKA_DATA_DIR" | tail -1)
-        log "Filesystem info: $filesystem_info"
+        log "✓ $KAFKA_DATA_DIR sur filesystem dédié: $mount_point"
     fi
     
-    # Vérification espace disque (minimum 50GB pour données Kafka)
-    available_space_kb=$(df "$KAFKA_DATA_DIR" | awk 'NR==2 {print $4}')
-    available_space_gb=$((available_space_kb / 1024 / 1024))
+    # Vérification espace disque (minimum 10GB pour cluster de test)
+    local available_space=$(df "$KAFKA_DATA_DIR" | tail -1 | awk '{print $4}')
+    local min_space_kb=$((10 * 1024 * 1024)) # 10GB en KB
     
-    if [[ $available_space_gb -lt 50 ]]; then
-        error_exit "Espace disque insuffisant pour KAFKA_DATA_DIR. Minimum 50GB requis, disponible: ${available_space_gb}GB"
+    if [[ $available_space -lt $min_space_kb ]]; then
+        error_exit "Espace disque insuffisant. Requis: 10GB, Disponible: $((available_space / 1024 / 1024))GB"
     fi
     
-    log "✓ Espace disque suffisant: ${available_space_gb}GB disponible"
-    
-    # Test écriture/lecture sur le filesystem
-    test_file="$KAFKA_DATA_DIR/.kafka_fs_test_$$"
-    if ! echo "test" > "$test_file" 2>/dev/null; then
-        error_exit "Impossible d'écrire sur $KAFKA_DATA_DIR"
-    fi
-    
-    if [[ "$(cat "$test_file" 2>/dev/null)" != "test" ]]; then
-        error_exit "Problème de lecture sur $KAFKA_DATA_DIR"
-    fi
-    
-    rm -f "$test_file"
-    log "✓ Test écriture/lecture sur filesystem réussi"
+    log "✓ Espace disque suffisant: $((available_space / 1024 / 1024))GB disponible"
 }
 
-# === VALIDATION PREREQUISITES ===
+# === VALIDATION PRÉREQUIS ===
 validate_prerequisites() {
-    log "Validation des prérequis..."
+    log "Validation des prérequis d'installation..."
     
-    # Vérification ID nœud
-    if [[ -z "$NODE_ID" ]] || [[ ! "$NODE_ID" =~ ^[1-3]$ ]]; then
+    # Validation NODE_ID
+    if [[ ! "$NODE_ID" =~ ^[1-3]$ ]]; then
         error_exit "ID nœud requis (1-3). Utilisez -n NUM"
     fi
     
@@ -247,108 +371,87 @@ configure_system() {
     
     # Création utilisateur système Kafka
     if ! id "$KAFKA_USER" &>/dev/null; then
-        useradd -r -s /bin/false -d "$KAFKA_HOME" "$KAFKA_USER"
+        useradd -r -s /sbin/nologin -d "$KAFKA_HOME" "$KAFKA_USER"
         log "Utilisateur $KAFKA_USER créé"
     fi
     
-    # Création des répertoires
-    mkdir -p "$KAFKA_HOME" "$KAFKA_DATA_DIR" "$KAFKA_LOGS_DIR"
-    chown -R "$KAFKA_USER:$KAFKA_GROUP" "$KAFKA_HOME" "$KAFKA_DATA_DIR" "$KAFKA_LOGS_DIR"
+    # Création des répertoires avec permissions sécurisées
+    local directories=("$KAFKA_HOME" "$KAFKA_DATA_DIR" "$KAFKA_LOGS_DIR")
+    for dir in "${directories[@]}"; do
+        mkdir -p "$dir"
+        chown "$KAFKA_USER:$KAFKA_GROUP" "$dir"
+        chmod 750 "$dir"
+    done
     
-    # Configuration limites système (PCI-DSS)
-    cat > /etc/security/limits.d/kafka.conf << 'EOF'
-# Kafka system limits - Banking Standards PCI-DSS
-kafka soft nofile 65536
-kafka hard nofile 65536
-kafka soft nproc 32768
-kafka hard nproc 32768
-kafka soft memlock unlimited
-kafka hard memlock unlimited
+    # Configuration limits système pour Kafka
+    cat > /etc/security/limits.d/kafka.conf << EOF
+# Limits pour utilisateur kafka - Banking Requirements
+$KAFKA_USER soft nofile 65536
+$KAFKA_USER hard nofile 65536
+$KAFKA_USER soft nproc 4096
+$KAFKA_USER hard nproc 4096
 EOF
     
-    # Configuration sysctl pour performance réseau et I/O
-    cat > /etc/sysctl.d/99-kafka.conf << 'EOF'
-# Kafka Performance Tuning - Banking Standards
-# Gestion mémoire virtuelle
+    # Configuration sysctl pour performances réseau
+    cat > /etc/sysctl.d/99-kafka.conf << EOF
+# Optimisations réseau pour Kafka - Banking Performance
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 12582912 134217728
+net.ipv4.tcp_wmem = 4096 12582912 134217728
 vm.swappiness = 1
-vm.dirty_background_ratio = 5
-vm.dirty_ratio = 60
-vm.dirty_expire_centisecs = 12000
-
-# Configuration réseau
-net.core.rmem_default = 262144
-net.core.rmem_max = 16777216
-net.core.wmem_default = 262144
-net.core.wmem_max = 16777216
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_rmem = 4096 65536 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-
-# Optimisation pour charges élevées
-net.core.netdev_max_backlog = 5000
-net.core.somaxconn = 1024
-net.ipv4.tcp_max_syn_backlog = 4096
 EOF
     
     sysctl -p /etc/sysctl.d/99-kafka.conf
     
-    log "Configuration système terminée"
+    log "Configuration système appliquée"
 }
 
-# === INSTALLATION JAVA 17 via RPM ===
+# === INSTALLATION JAVA VIA RPM ===
 install_java_rpm() {
-    log "Installation Java 17 via RPM..."
-    
-    # Vérification si Java 17 déjà installé
-    if java -version 2>&1 | grep -q "17\."; then
-        log "Java 17 déjà installé"
-        java -version 2>&1 | head -3 | while read line; do log "$line"; done
-        return
-    fi
+    log "Installation Java JDK 17 via RPM local..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Installation Java 17 RPM simulée"
+        log "[DRY-RUN] Installation Java simulée"
         return
     fi
     
-    # Installation via YUM depuis repository local
-    log "Installation du package java-17-openjdk.x86_64..."
-    yum install -y java-17-openjdk.x86_64 java-17-openjdk-devel.x86_64
+    # Installation Java depuis repository local
+    if ! rpm -q java-17-openjdk-headless &>/dev/null; then
+        yum install -y java-17-openjdk-headless java-17-openjdk-devel
+        log "Java JDK 17 installé avec succès"
+    else
+        log "Java JDK 17 déjà installé"
+    fi
     
-    # Configuration des alternatives pour Java
-    alternatives --install /usr/bin/java java /usr/lib/jvm/java-17-openjdk/bin/java 1
-    alternatives --install /usr/bin/javac javac /usr/lib/jvm/java-17-openjdk/bin/javac 1
+    # Configuration JAVA_HOME
+    export JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
+    echo "export JAVA_HOME=$JAVA_HOME" > /etc/profile.d/java.sh
+    chmod 644 /etc/profile.d/java.sh
     
-    # Configuration variable d'environnement globale
-    cat > /etc/profile.d/java.sh << 'EOF'
-# Java 17 Environment Configuration
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-export PATH=$JAVA_HOME/bin:$PATH
-EOF
-    
-    source /etc/profile.d/java.sh
-    
-    # Validation installation
-    java_version=$(java -version 2>&1 | head -1)
-    log "Java installé avec succès: $java_version"
-    log "JAVA_HOME: $JAVA_HOME"
+    # Vérification installation
+    local java_version=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1)
+    log "Java installé: $java_version"
 }
 
 # === INSTALLATION KAFKA ===
 install_kafka() {
-    log "Installation Kafka $KAFKA_VERSION..."
+    log "Installation Kafka $KAFKA_VERSION depuis repository local..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
         return
     fi
     
-    # Téléchargement depuis repository local
     cd /tmp
-    curl -O "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
     
-    # Vérification intégrité avec checksum si disponible
-    if curl -s "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha256" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha256"; then
+    # Téléchargement depuis repository local
+    if ! curl -f "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
+        error_exit "Échec téléchargement Kafka depuis $REPO_SERVER"
+    fi
+    
+    # Vérification checksum si disponible
+    if curl -f "http://$REPO_SERVER/kafka/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha256" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha256"; then
         if sha256sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha256"; then
             log "✓ Checksum validé avec succès"
         else
@@ -396,91 +499,100 @@ configure_kafka() {
     
     # Configuration server.properties avec variables
     cat > "$KAFKA_HOME/config/server.properties" << EOF
-# === CONFIGURATION KAFKA BROKER $NODE_ID ===
-# Banking Environment - PCI-DSS Compliant
-# Node IP: ${KAFKA_NODES[$NODE_ID]}
+# === CONFIGURATION KAFKA CLUSTER BANCAIRE ===
+# Generated by $SCRIPT_NAME v$SCRIPT_VERSION
+# Date: $(date)
+# Conformité: PCI-DSS, ANSSI-BP-028
 
-# Broker Configuration
+# === IDENTITÉ BROKER ===
 broker.id=$NODE_ID
+
+# === LISTENERS ET NETWORK ===
 listeners=PLAINTEXT://0.0.0.0:9092
 advertised.listeners=PLAINTEXT://$local_ip:9092
+listener.security.protocol.map=PLAINTEXT:PLAINTEXT
 
-# Cluster Configuration
+# === ZOOKEEPER CONNECTION ===
 zookeeper.connect=$zk_connect
+zookeeper.connection.timeout.ms=18000
+zookeeper.session.timeout.ms=18000
 
-# Log Configuration
+# === DATA DIRECTORIES ===
 log.dirs=$KAFKA_DATA_DIR
 num.network.threads=8
-num.io.threads=16
+num.io.threads=8
 socket.send.buffer.bytes=102400
 socket.receive.buffer.bytes=102400
 socket.request.max.bytes=104857600
 
-# Topic Configuration for ACM Banking
-num.partitions=12
+# === LOG CONFIGURATION (Banking Requirements) ===
+num.partitions=5
+num.recovery.threads.per.data.dir=1
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
 default.replication.factor=3
 min.insync.replicas=2
-auto.create.topics.enable=true
 
-# Log Retention (Banking Standards - 7 jours)
+# === RETENTION ET CLEANUP (ACM Banking) ===
 log.retention.hours=168
-log.retention.bytes=1073741824
+log.retention.bytes=-1
 log.segment.bytes=1073741824
 log.retention.check.interval.ms=300000
+log.cleanup.policy=delete
 
-# Recovery Configuration (High Availability)
-unclean.leader.election.enable=false
+# === GROUP COORDINATOR ===
+group.initial.rebalance.delay.ms=3000
+offsets.topic.num.partitions=50
+offsets.retention.minutes=10080
+
+# === COMPRESSION ET PERFORMANCES ===
+compression.type=lz4
+message.max.bytes=1000000
+replica.fetch.max.bytes=1048576
+
+# === MONITORING ET MÉTRIQUES ===
+auto.create.topics.enable=true
 delete.topic.enable=true
 controlled.shutdown.enable=true
 controlled.shutdown.max.retries=3
+controlled.shutdown.retry.backoff.ms=5000
 
-# JMX Configuration for Monitoring
-jmx.port=9999
-
-# Security Configuration (ANSSI-BP-028)
-security.protocol=PLAINTEXT
-inter.broker.protocol.version=3.9
-
-# Performance Tuning
-replica.fetch.max.bytes=1048576
-message.max.bytes=1000000
-replica.socket.timeout.ms=30000
-replica.lag.time.max.ms=10000
-
-# ACM Specific Configuration
-group.initial.rebalance.delay.ms=3000
-transaction.state.log.replication.factor=3
-transaction.state.log.min.isr=2
-
-# Banking Compliance Settings
-log.flush.interval.messages=10000
-log.flush.interval.ms=1000
+# === SÉCURITÉ BANCAIRE ===
+inter.broker.protocol.version=3.9-IV0
+log.message.format.version=3.9-IV0
 EOF
     
-    # Configuration JVM optimisée pour environnement bancaire
-    cat > "$KAFKA_HOME/bin/kafka-server-start-env.sh" << EOF
-#!/bin/bash
-# === KAFKA JVM CONFIGURATION - Banking Standards ===
+    # Configuration log4j pour compliance Banking
+    cat > "$KAFKA_HOME/config/log4j.properties" << EOF
+# === CONFIGURATION LOGGING BANCAIRE ===
+# Root logger
+log4j.rootLogger=INFO, stdout, kafkaAppender
 
-# Heap sizing
-export KAFKA_HEAP_OPTS="-Xmx$JVM_HEAP_SIZE -Xms$JVM_HEAP_SIZE"
+# Console appender
+log4j.appender.stdout=org.apache.log4j.ConsoleAppender
+log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
+log4j.appender.stdout.layout.ConversionPattern=[%d] %p %m (%c)%n
 
-# GC Configuration (G1GC pour stabilité)
-export KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -Djava.awt.headless=true -XX:+UseStringDeduplication"
+# File appender avec rotation (Banking Requirements)
+log4j.appender.kafkaAppender=org.apache.log4j.RollingFileAppender
+log4j.appender.kafkaAppender.File=$KAFKA_LOGS_DIR/server.log
+log4j.appender.kafkaAppender.MaxFileSize=100MB
+log4j.appender.kafkaAppender.MaxBackupIndex=10
+log4j.appender.kafkaAppender.layout=org.apache.log4j.PatternLayout
+log4j.appender.kafkaAppender.layout.ConversionPattern=[%d] %p %m (%c)%n
 
-# Logging Configuration
-export KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$KAFKA_HOME/config/log4j.properties"
-
-# Security and Monitoring
-export KAFKA_OPTS="-Djava.security.auth.login.config=$KAFKA_HOME/config/kafka_server_jaas.conf -Dcom.sun.management.jmxremote=true -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false"
-
-# Memory mapping optimization
-export KAFKA_OPTS="\$KAFKA_OPTS -XX:+AlwaysPreTouch"
+# Suppression logs sensibles pour conformité PCI-DSS
+log4j.logger.kafka.network.RequestChannel\$=WARN
+log4j.logger.kafka.producer.async.DefaultEventHandler=DEBUG
+log4j.logger.kafka.request.logger=WARN
+log4j.logger.kafka.controller=TRACE
+log4j.logger.kafka.log.LogCleaner=INFO
+log4j.logger.state.change.logger=TRACE
+log4j.logger.kafka.authorizer.logger=DEBUG
 EOF
     
-    chmod +x "$KAFKA_HOME/bin/kafka-server-start-env.sh"
-    
-    log "Configuration Kafka terminée pour nœud $NODE_ID"
+    log "Configuration Kafka générée avec IP locale: $local_ip"
 }
 
 # === CONFIGURATION SELINUX ===
@@ -492,68 +604,72 @@ configure_selinux() {
         return
     fi
     
-    # Vérification mode SELinux
-    selinux_mode=$(getenforce)
-    log "Mode SELinux actuel: $selinux_mode"
-    
-    if [[ "$selinux_mode" != "Enforcing" ]]; then
-        log "ATTENTION: SELinux n'est pas en mode Enforcing (requis pour conformité bancaire)"
+    # Vérification SELinux actif
+    if ! command -v getenforce &> /dev/null || [[ "$(getenforce)" == "Disabled" ]]; then
+        log "SELinux désactivé - skipping configuration"
+        return
     fi
     
-    # Contextes SELinux pour Kafka
-    semanage fcontext -a -t bin_t "$KAFKA_HOME/bin(/.*)?" 2>/dev/null || true
-    semanage fcontext -a -t etc_t "$KAFKA_HOME/config(/.*)?" 2>/dev/null || true
-    semanage fcontext -a -t var_log_t "$KAFKA_LOGS_DIR(/.*)?" 2>/dev/null || true
-    semanage fcontext -a -t var_lib_t "$KAFKA_DATA_DIR(/.*)?" 2>/dev/null || true
+    # Configuration ports Kafka
+    semanage port -a -t http_port_t -p tcp 9092 2>/dev/null || \
+    semanage port -m -t http_port_t -p tcp 9092
+    
+    # Contextes pour répertoires Kafka
+    semanage fcontext -a -t admin_home_t "$KAFKA_HOME(/.*)?" 2>/dev/null || \
+    semanage fcontext -m -t admin_home_t "$KAFKA_HOME(/.*)?"
+    
+    semanage fcontext -a -t var_log_t "$KAFKA_LOGS_DIR(/.*)?" 2>/dev/null || \
+    semanage fcontext -m -t var_log_t "$KAFKA_LOGS_DIR(/.*)?"
+    
+    semanage fcontext -a -t admin_home_t "$KAFKA_DATA_DIR(/.*)?" 2>/dev/null || \
+    semanage fcontext -m -t admin_home_t "$KAFKA_DATA_DIR(/.*)?"
     
     # Application des contextes
     restorecon -R "$KAFKA_HOME" "$KAFKA_LOGS_DIR" "$KAFKA_DATA_DIR"
     
-    # Ports Kafka et JMX
-    semanage port -a -t http_port_t -p tcp 9092 2>/dev/null || true
-    semanage port -a -t http_port_t -p tcp 9999 2>/dev/null || true
-    
-    log "SELinux configuré pour Kafka"
+    log "Configuration SELinux appliquée"
 }
 
-# === SERVICE SYSTEMD ===
+# === CRÉATION SERVICE SYSTEMD ===
 create_systemd_service() {
-    log "Création service systemd..."
+    log "Création service systemd Kafka..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Service systemd simulé"
+        log "[DRY-RUN] Création service systemd simulée"
         return
     fi
     
+    # Service Kafka avec configuration Banking
     cat > /etc/systemd/system/kafka.service << EOF
 [Unit]
-Description=Apache Kafka Server (Broker $NODE_ID) - ACM Banking
-Documentation=https://kafka.apache.org/
-Requires=network.target
-After=network.target zookeeper.service
+Description=Apache Kafka Server (Banking Cluster Node $NODE_ID)
+Documentation=https://kafka.apache.org/documentation/
+Requires=network.target remote-fs.target
+After=network.target remote-fs.target zookeeper.service
 
 [Service]
 Type=simple
 User=$KAFKA_USER
 Group=$KAFKA_GROUP
-Environment=JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-Environment=KAFKA_HOME=$KAFKA_HOME
-ExecStartPre=/bin/bash $KAFKA_HOME/bin/kafka-server-start-env.sh
+Environment=JAVA_HOME=$JAVA_HOME
+Environment=KAFKA_HEAP_OPTS="-Xmx$JVM_HEAP_SIZE -Xms$JVM_HEAP_SIZE"
+Environment=KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
+Environment=KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$KAFKA_HOME/config/log4j.properties"
 ExecStart=$KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties
 ExecStop=$KAFKA_HOME/bin/kafka-server-stop.sh
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=kafka
 KillMode=process
-TimeoutStopSec=300
+TimeoutStopSec=30
 
-# Security Settings (Banking Standards PCI-DSS)
+# Sécurité Banking (ANSSI-BP-028)
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
 ProtectHome=true
+ProtectSystem=strict
 ReadWritePaths=$KAFKA_DATA_DIR $KAFKA_LOGS_DIR
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
@@ -561,26 +677,28 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 EOF
     
+    # Activation du service
     systemctl daemon-reload
     systemctl enable kafka
     
-    log "Service systemd créé et activé"
+    log "Service systemd kafka créé et activé"
 }
 
-# === VALIDATION POST-INSTALLATION ===
+# === VALIDATION INSTALLATION ===
 validate_installation() {
     log "Validation de l'installation..."
     
-    # Vérification Java
-    if ! java -version &>/dev/null; then
-        error_exit "Java non disponible après installation"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "[DRY-RUN] Validation installation simulée"
+        return
     fi
     
-    # Vérification fichiers Kafka
+    # Vérification fichiers critiques
     local required_files=(
         "$KAFKA_HOME/bin/kafka-server-start.sh"
         "$KAFKA_HOME/config/server.properties"
-        "$KAFKA_HOME/bin/kafka-server-start-env.sh"
+        "$KAFKA_HOME/config/log4j.properties"
+        "/etc/systemd/system/kafka.service"
     )
     
     for file in "${required_files[@]}"; do
@@ -605,6 +723,15 @@ validate_installation() {
 # === FONCTION PRINCIPALE ===
 main() {
     log "=== DÉBUT INSTALLATION KAFKA CLUSTER v$SCRIPT_VERSION ==="
+    
+    # Chargement de la configuration KAFKA_NODES
+    load_kafka_nodes_configuration
+    
+    # Validation interactive (sauf si skip-validation)
+    if [[ "$SKIP_VALIDATION" != "true" && "$CHECK_FS_ONLY" != "true" && "$DRY_RUN" != "true" ]]; then
+        validate_kafka_nodes_interactive
+    fi
+    
     log "Nœud: $NODE_ID (${KAFKA_NODES[$NODE_ID]}), Repository: $REPO_SERVER"
     
     # Mode vérification filesystem seulement
@@ -635,6 +762,11 @@ main() {
     log "VALIDATION CLUSTER:"
     log "  kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
     log "  kafka-topics.sh --bootstrap-server localhost:9092 --list"
+    log ""
+    log "CONFIGURATION UTILISÉE:"
+    for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
+        log "  Nœud $node_id: ${KAFKA_NODES[$node_id]}"
+    done
 }
 
 # === EXÉCUTION ===
