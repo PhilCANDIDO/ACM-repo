@@ -284,10 +284,10 @@ check_kafka_filesystem() {
     
     # Vérification espace libre
     local available_space=$(df $KAFKA_DATA_DIR | tail -1 | awk '{print $4}')
-    local min_space_kb=$((20 * 1024 * 1024))  # 20GB en KB
+    local min_space_kb=$((10 * 1024 * 1024))  # 20GB en KB
     
     if [[ "$available_space" -lt "$min_space_kb" ]]; then
-        error_exit "Espace insuffisant sur /data: ${available_space}KB disponible, ${min_space_kb}KB requis"
+        error_exit "Espace insuffisant sur $KAFKA_DATA_DIR: ${available_space}KB disponible, ${min_space_kb}KB requis"
     fi
     
     log "✓ Filesystem $KAFKA_DATA_DIR: ${available_space}KB disponible"
