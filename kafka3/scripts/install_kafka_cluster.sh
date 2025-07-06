@@ -277,27 +277,27 @@ fi
 check_kafka_filesystem() {
     log "Vérification filesystem pour Kafka..."
     
-    # Vérification montage /data
-    if ! mountpoint -q /data; then
-        error_exit "Filesystem /data non monté. Requis pour KAFKA_DATA_DIR"
+    # Vérification montage $KAFKA_DATA_DIR
+    if ! mountpoint -q $KAFKA_DATA_DIR; then
+        error_exit "Filesystem $KAFKA_DATA_DIR non monté. Requis pour KAFKA_DATA_DIR"
     fi
     
     # Vérification espace libre
-    local available_space=$(df /data | tail -1 | awk '{print $4}')
+    local available_space=$(df $KAFKA_DATA_DIR | tail -1 | awk '{print $4}')
     local min_space_kb=$((20 * 1024 * 1024))  # 20GB en KB
     
     if [[ "$available_space" -lt "$min_space_kb" ]]; then
         error_exit "Espace insuffisant sur /data: ${available_space}KB disponible, ${min_space_kb}KB requis"
     fi
     
-    log "✓ Filesystem /data: ${available_space}KB disponible"
+    log "✓ Filesystem $KAFKA_DATA_DIR: ${available_space}KB disponible"
     
     # Vérification permissions et montage /var/log
-    if [[ ! -d "/var/log" ]] || [[ ! -w "/var/log" ]]; then
-        error_exit "Répertoire /var/log inaccessible ou non accessible en écriture"
+    if [[ ! -d "$KAFKA_LOGS_DIR" ]] || [[ ! -w "$KAFKA_LOGS_DIR" ]]; then
+        error_exit "Répertoire $KAFKA_LOGS_DIR inaccessible ou non accessible en écriture"
     fi
     
-    log "✓ Répertoire /var/log accessible"
+    log "✓ Répertoire $KAFKA_LOGS_DIR accessible"
     log "✓ Validation filesystem terminée avec succès"
 }
 
