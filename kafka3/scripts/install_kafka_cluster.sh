@@ -45,6 +45,7 @@ JVM_HEAP_SIZE="2g"
 # === VARIABLES GLOBALES ===
 NODE_ID=""
 REPO_SERVER="172.20.2.109"
+REPO_SERVER_BASEURL="/repos"
 DRY_RUN="false"
 CHECK_FS_ONLY="false"
 SKIP_VALIDATION="false"
@@ -356,15 +357,15 @@ configure_yum_repository() {
     fi
     
     # Test connectivité repository
-    if ! curl -f -s "http://$REPO_SERVER/" > /dev/null; then
-        error_exit "Repository server inaccessible: $REPO_SERVER"
+    if ! curl -f -s -k "http://$REPO_SERVER/$REPO_SERVER_BASEURL/" > /dev/null; then
+        error_exit "Repository server inaccessible: http://$REPO_SERVER/$REPO_SERVER_BASEURL"
     fi
     
     # Configuration repository Kafka
     cat > /etc/yum.repos.d/kafka-local.repo << EOF
 [kafka-local]
 name=Kafka Local Repository  
-baseurl=http://$REPO_SERVER/repos/kafka3/
+baseurl=http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/
 enabled=1
 gpgcheck=0
 priority=1
@@ -374,7 +375,7 @@ EOF
     cat > /etc/yum.repos.d/java-local.repo << EOF
 [java-local]
 name=Java Local Repository  
-baseurl=http://$REPO_SERVER/repos/java/
+baseurl=http://$REPO_SERVER/$REPO_SERVER_BASEURL/java/
 enabled=1
 gpgcheck=0
 priority=1
@@ -384,8 +385,8 @@ EOF
     yum clean all
     yum makecache
     
-    log "Repository YUM configuré: http://$REPO_SERVER/repos/kafka3/"
-    log "Repository YUM configuré: http://$REPO_SERVER/repos/java/"
+    log "Repository YUM configuré: http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/"
+    log "Repository YUM configuré: http://$REPO_SERVER/$REPO_SERVER_BASEURL/java/"
 }
 
 # === CONFIGURATION SYSTÈME ===
@@ -465,8 +466,8 @@ install_java_rpm() {
 # === INSTALLATION KAFKA ===
 install_kafka() {
     log "Installation Kafka $KAFKA_VERSION depuis repository local..."
-    log "URL Archive : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
-    log "URL Checksum : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"
+    log "URL Archive : http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    log "URL Checksum : http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
@@ -476,12 +477,12 @@ install_kafka() {
     cd /tmp
     
     # Téléchargement depuis repository local
-    if ! curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
+    if ! curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
         error_exit "Échec téléchargement Kafka depuis $REPO_SERVER"
     fi
     
     # Vérification checksum si disponible
-    if curl -f "http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
+    if curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
         if sha512sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
             log "✓ Checksum validé avec succès"
         else
