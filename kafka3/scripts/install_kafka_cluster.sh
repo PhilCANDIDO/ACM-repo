@@ -369,12 +369,23 @@ enabled=1
 gpgcheck=0
 priority=1
 EOF
+
+    # Configuration repository Kafka
+    cat > /etc/yum.repos.d/java-local.repo << EOF
+[java-local]
+name=Java Local Repository  
+baseurl=http://$REPO_SERVER/repos/java/
+enabled=1
+gpgcheck=0
+priority=1
+EOF
     
     # Nettoyage cache YUM
     yum clean all
     yum makecache
     
     log "Repository YUM configuré: http://$REPO_SERVER/repos/kafka3/"
+    log "Repository YUM configuré: http://$REPO_SERVER/repos/java/"
 }
 
 # === CONFIGURATION SYSTÈME ===
