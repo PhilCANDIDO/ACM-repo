@@ -1,1 +1,6 @@
 *.rpm
+<<<<<<< HEAD
+=======
+*.gz
+*.xml
+>>>>>>> 1f567bb (Ignore RPMs, GZ and XML)
