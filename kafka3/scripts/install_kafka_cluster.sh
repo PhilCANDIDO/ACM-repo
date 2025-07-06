@@ -437,7 +437,8 @@ install_java_rpm() {
 # === INSTALLATION KAFKA ===
 install_kafka() {
     log "Installation Kafka $KAFKA_VERSION depuis repository local..."
-    log "URL : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    log "URL Archive : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    log "URL Checksum : http://$REPO_SERVER/repos/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
