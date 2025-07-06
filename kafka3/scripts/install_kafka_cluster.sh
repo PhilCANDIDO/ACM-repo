@@ -2,7 +2,7 @@
 ################################################################################
 # Script: install_kafka_cluster.sh
 # Version: 2.2.0
-# Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking avec firewall
+# Description: Installation Kafka 3.9.0 en cluster HA pour ACM avec firewall
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
 # 
