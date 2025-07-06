@@ -338,7 +338,7 @@ configure_yum_repository() {
 # Repository local ACM pour environnement air-gapped
 [acm-java]
 name=ACM Local Repository - Java
-baseurl=http://$REPO_SERVER/java/
+baseurl=http://$REPO_SERVER/repos/java/
 enabled=1
 gpgcheck=0
 module_hotfixes=1
@@ -346,7 +346,7 @@ sslverify=false
 
 [acm-kafka]
 name=ACM Local Repository - Kafka
-baseurl=http://$REPO_SERVER/kafka/
+baseurl=http://$REPO_SERVER/repos/kafka3/
 enabled=1
 gpgcheck=0
 module_hotfixes=1
