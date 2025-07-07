@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
 # Changelog:
+# v1.3.0 (2025-07-07): Fix Test 3 to use correct zookeeper-shell.sh invocation and validate count of broker IDs.
+# v1.2.0 (2025-07-07): Redirect debug output to stderr and apply exec_cmd to Test 1 & 2.
 # v1.1.0 (2025-07-07): Added --debug option to display executed commands for each test.
 # v1.0.0 (2025-07-07): Initial release implementing Kafka multibroker diagnostics.
 
 script_name=$(basename "$0")
-script_version="v1.1.0"
+script_version="v1.3.0"
 
 # ANSI color codes
 BLUE='\e[1;34m'
@@ -39,7 +41,6 @@ Options:
 EOF
 }
 
-# write a timestamped entry to the log file
 log() {
   local level="$1"
   local msg="$2"
@@ -48,16 +49,15 @@ log() {
   echo "${ts} [${level}] ${msg}" >> "$LOG_FILE"
 }
 
-# execute a command string, optionally printing it if debug is enabled
+# execute a command, printing debug to stderr if enabled
 exec_cmd() {
   local cmd="$1"
   if [ "$DEBUG" = true ]; then
-    echo -e "${BLUE}[DEBUG]${RESET} Executing: $cmd"
+    echo -e "${BLUE}[DEBUG]${RESET} Executing: $cmd" >&2
   fi
   eval "$cmd"
 }
 
-# output functions: print to stdout with color and log
 info()    { echo -e "${BLUE}[INFO] $1${RESET}";    log "INFO"    "$1"; }
 success() { echo -e "${GREEN}[SUCCESS] $1${RESET}"; log "SUCCESS" "$1"; }
 warning() { echo -e "${YELLOW}[WARNING] $1${RESET}"; log "WARNING" "$1"; }
@@ -72,37 +72,24 @@ fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
-      print_help
-      exit 0
-      ;;
+      print_help; exit 0;;
     --brokers)
-      BROKERS_STR="$2"
-      shift 2
-      ;;
+      BROKERS_STR="$2"; shift 2;;
     --log-file)
-      LOG_FILE="$2"
-      shift 2
-      ;;
+      LOG_FILE="$2"; shift 2;;
     --debug)
-      DEBUG=true
-      shift
-      ;;
+      DEBUG=true; shift;;
     *)
-      echo "Unknown argument: $1"
-      print_help
-      exit 1
-      ;;
+      echo "Unknown argument: $1"; print_help; exit 1;;
   esac
 done
 
-# ensure brokers argument is provided
 if [ -z "${BROKERS_STR:-}" ]; then
   error "Argument --brokers is required"
   print_help
   exit 1
 fi
 
-# initialize log file
 : > "$LOG_FILE"
 
 info "Starting Kafka multibroker diagnostic (version ${script_version})"
@@ -110,8 +97,7 @@ info "Brokers to analyze: ${BROKERS_STR//,/\, }"
 
 # parse brokers into arrays
 IFS=',' read -r -a entries <<< "$BROKERS_STR"
-broker_ids=()
-broker_ips=()
+broker_ids=(); broker_ips=()
 for e in "${entries[@]}"; do
   broker_ids+=("${e%%:*}")
   broker_ips+=("${e#*:}")
@@ -137,8 +123,7 @@ done
 # Test 2: ZooKeeper roles
 #
 info "➤ Test 2 - ZooKeeper roles"
-leader_count=0
-follower_count=0
+leader_count=0; follower_count=0
 declare -A modes
 for ip in "${broker_ips[@]}"; do
   cmd="echo stat | nc -w 5 \"$ip\" \"$ZK_PORT\" 2>/dev/null"
@@ -166,24 +151,23 @@ fi
 # Test 3: Brokers registered in ZooKeeper
 #
 info "➤ Test 3 - Brokers registered in ZooKeeper"
-cmd="echo \"ls /brokers/ids\" | /opt/kafka/bin/zookeeper-shell.sh \"${first_broker_ip}:${ZK_PORT}\" 2>/dev/null"
-zk_list=$(exec_cmd "$cmd" | grep '^\[')
-if [[ $zk_list =~ \[([0-9,]+)\] ]]; then
-  zk_ids="${BASH_REMATCH[1]}"
-  IFS=',' read -r -a reg_ids <<< "$zk_ids"
-  missing=()
-  for id in "${broker_ids[@]}"; do
-    if ! printf '%s\n' "${reg_ids[@]}" | grep -qx "$id"; then
-      missing+=("$id")
-    fi
+cmd="/opt/kafka/bin/zookeeper-shell.sh ${first_broker_ip}:${ZK_PORT} ls /brokers/ids"
+zk_output=$(exec_cmd "$cmd" | tail -n1)
+# expected format: [1, 2, 3]
+if [[ $zk_output =~ ^\[(.*)\]$ ]]; then
+  IFS=',' read -r -a reg_ids <<< "${BASH_REMATCH[1]}"
+  # trim whitespace
+  for i in "${!reg_ids[@]}"; do
+    reg_ids[$i]=$(echo "${reg_ids[$i]}" | xargs)
   done
-  if [ ${#missing[@]} -eq 0 ]; then
-    success "Brokers registered: [${zk_ids}]"
+  # compare counts
+  if [ "${#reg_ids[@]}" -eq "$num_brokers" ]; then
+    success "Brokers registered: [${reg_ids[*]}]"
   else
-    error "Missing broker(s) in ZooKeeper: ${missing[*]}"
+    error "Expected ${num_brokers} brokers in ZooKeeper but found ${#reg_ids[@]}: [${reg_ids[*]}]"
   fi
 else
-  error "Unable to list brokers in ZooKeeper"
+  error "Unable to parse broker list from ZooKeeper output"
 fi
 
 #
@@ -200,7 +184,7 @@ for ip in "${broker_ips[@]}"; do
 done
 
 #
-# Test 5: Kafka Broker API accessibility
+# Test 5: Kafka API accessibility
 #
 info "➤ Test 5 - Kafka API accessibility"
 cmd="/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server \"${first_broker_ip}:${KAFKA_PORT}\" &>/dev/null"
