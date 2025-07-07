@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
 # Script: install_kafka_cluster.sh
-# Version: 2.2.0
+# Version: 2.2.1
 # Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking avec firewall
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
@@ -10,6 +10,7 @@
 # Environment: RHEL 9 Air-gapped
 #
 # CHANGELOG:
+# v2.2.1 - Ajout Ajout de l'argument --skip-fs-validation
 # v2.2.0 - Ajout configuration automatique firewall TCP/9092 et TCP/2181
 # v2.1.0 - Ajout validation interactive KAFKA_NODES et support variable système
 # v2.0.0 - Refactorisation avec RPM Java, variables nœuds, vérification filesystem
@@ -49,6 +50,7 @@ REPO_SERVER_BASEURL="/repos"
 DRY_RUN="false"
 CHECK_FS_ONLY="false"
 SKIP_VALIDATION="false"
+SKIP_FS_VALIDATION="false"
 
 # === LOGGING FUNCTION ===
 log() {
@@ -191,13 +193,15 @@ OPTIONS:
     -r, --repo-server IP    IP du serveur repository (défaut: 172.20.2.109)
     --dry-run              Mode test sans modification
     --check-fs             Vérifier seulement les filesystems
-    --skip-validation      Ignorer la validation interactive (mode automatique)
+    --skip-validation      Ignorer la validation interactive (mode automatique
+    --skip-fs-validation   Ignorer la vérification des filesystems
 
 EXEMPLES:
     $SCRIPT_NAME -n 1                    # Installation broker ID 1
     $SCRIPT_NAME -n 2 -r 172.20.2.109    # Broker 2 avec repo custom
     $SCRIPT_NAME --check-fs              # Vérification filesystems seulement
     $SCRIPT_NAME -n 1 --skip-validation  # Installation sans validation interactive
+    $SCRIPT_NAME -n 1 --skip-fs-validation  # Installation sans vérification filesystem
 
 CONFIGURATION KAFKA_NODES:
     Le script supporte deux méthodes de configuration des nœuds :
@@ -257,6 +261,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-validation)
             SKIP_VALIDATION="true"
+            shift
+            ;;
+        --skip-fs-validation)
+            SKIP_FS_VALIDATION="true"
             shift
             ;;
         *)
@@ -342,7 +350,11 @@ validate_prerequisites() {
     fi
 
     # Vérification filesystem
-    check_kafka_filesystem
+    if [[ "$SKIP_FS_VALIDATION" != "true" ]]; then
+        check_kafka_filesystem
+    else
+        log "⚠️  ATTENTION: Vérification filesystem ignorée (--skip-fs-validation activé)"
+    fi
 
     log "✓ Prérequis système validés"
 }
