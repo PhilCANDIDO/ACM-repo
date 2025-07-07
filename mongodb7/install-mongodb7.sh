@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # MongoDB 7.0 Installation Script
-VERSION="1.3.0"
+VERSION="1.4.0"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE="${SCRIPT_NAME%.*}.log"
 
@@ -9,6 +9,7 @@ LOG_FILE="${SCRIPT_NAME%.*}.log"
 PROTOCOL="http"
 REPO_HOSTNAME=""
 REPO_PATH="mongodb7"
+SKIP_FS_VALIDATION=false
 
 # Logging function
 log_message() {
@@ -35,14 +36,17 @@ REQUIRED ARGUMENTS:
 OPTIONAL ARGUMENTS:
     --protocol          Protocol to use (http|https) [default: http]
     --repo-path         Repository path [default: mongodb7]
+    --skip-fs-validation Skip filesystem mount points validation
     -h, --help          Show this help message
 
 EXAMPLES:
     ${SCRIPT_NAME} --repo-hostname 172.20.2.109
     ${SCRIPT_NAME} --repo-hostname repo.example.com --protocol https
     ${SCRIPT_NAME} --repo-hostname 172.20.2.109 --repo-path custom-mongodb
+    ${SCRIPT_NAME} --repo-hostname 172.20.2.109 --skip-fs-validation
 
 CHANGELOG:
+    v1.4.0 - Added --skip-fs-validation option to bypass mount points validation
     v1.3.0 - Added network binding configuration (bindIpAll: true) and firewall rules for port 27017
     v1.2.0 - Fixed repository URL path to include 'repos' directory
     v1.1.0 - Enhanced mount point validation to check fstab entries and actual mount status
@@ -64,6 +68,10 @@ while [[ $# -gt 0 ]]; do
         --repo-path)
             REPO_PATH="$2"
             shift 2
+            ;;
+        --skip-fs-validation)
+            SKIP_FS_VALIDATION=true
+            shift
             ;;
         -h|--help)
             show_help
@@ -93,6 +101,7 @@ fi
 # Start logging
 log_message "Starting MongoDB 7.0 installation script v${VERSION}"
 log_message "Configuration: ${PROTOCOL}://${REPO_HOSTNAME}/${REPO_PATH}"
+log_message "Filesystem validation: $([[ "${SKIP_FS_VALIDATION}" == "true" ]] && echo "DISABLED" || echo "ENABLED")"
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
@@ -102,31 +111,40 @@ fi
 
 log_message "Root check: OK"
 
-# Check required mount points
-log_message "Checking required mount points in fstab"
+# Check required mount points (conditionally based on --skip-fs-validation)
+if [[ "${SKIP_FS_VALIDATION}" == "false" ]]; then
+    log_message "Checking required mount points in fstab"
 
-if ! grep -q "^[^#]*[[:space:]]/var/lib/mongo[[:space:]]" /etc/fstab; then
-    log_message "ERROR: Mount point /var/lib/mongo not found in /etc/fstab"
-    exit 1
+    if ! grep -q "^[^#]*[[:space:]]/var/lib/mongo[[:space:]]" /etc/fstab; then
+        log_message "ERROR: Mount point /var/lib/mongo not found in /etc/fstab"
+        exit 1
+    fi
+
+    if ! grep -q "^[^#]*[[:space:]]/var/log/mongodb[[:space:]]" /etc/fstab; then
+        log_message "ERROR: Mount point /var/log/mongodb not found in /etc/fstab"
+        exit 1
+    fi
+
+    # Verify mount points are actually mounted
+    if ! mountpoint -q /var/lib/mongo; then
+        log_message "ERROR: /var/lib/mongo is not mounted"
+        exit 1
+    fi
+
+    if ! mountpoint -q /var/log/mongodb; then
+        log_message "ERROR: /var/log/mongodb is not mounted"
+        exit 1
+    fi
+
+    log_message "Mount points check: OK"
+else
+    log_message "Mount points validation SKIPPED (--skip-fs-validation enabled)"
+    # Ensure directories exist when validation is skipped
+    log_message "Ensuring MongoDB directories exist"
+    mkdir -p /var/lib/mongo /var/log/mongodb
+    chown mongod:mongod /var/lib/mongo /var/log/mongodb 2>/dev/null || true
+    log_message "MongoDB directories created/verified"
 fi
-
-if ! grep -q "^[^#]*[[:space:]]/var/log/mongodb[[:space:]]" /etc/fstab; then
-    log_message "ERROR: Mount point /var/log/mongodb not found in /etc/fstab"
-    exit 1
-fi
-
-# Verify mount points are actually mounted
-if ! mountpoint -q /var/lib/mongo; then
-    log_message "ERROR: /var/lib/mongo is not mounted"
-    exit 1
-fi
-
-if ! mountpoint -q /var/log/mongodb; then
-    log_message "ERROR: /var/log/mongodb is not mounted"
-    exit 1
-fi
-
-log_message "Mount points check: OK"
 
 # Create MongoDB repository file
 REPO_FILE="/etc/yum.repos.d/mongodb-org-7.0.repo"
