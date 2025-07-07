@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
 # Script: install_kafka_cluster.sh
-# Version: 2.2.1
+# Version: 2.2.2
 # Description: Installation Kafka 3.9.0 en cluster HA pour ACM Banking avec firewall
 # Author: Philippe.candido@emerging-it.fr
 # Date: 2025-07-06
@@ -10,6 +10,7 @@
 # Environment: RHEL 9 Air-gapped
 #
 # CHANGELOG:
+# v2.2.1 - Fix variable zk_connect dans la fonction configure_kafka 
 # v2.2.1 - Ajout Ajout de l'argument --skip-fs-validation
 # v2.2.0 - Ajout configuration automatique firewall TCP/9092 et TCP/2181
 # v2.1.0 - Ajout validation interactive KAFKA_NODES et support variable système
@@ -20,7 +21,7 @@
 set -euo pipefail
 trap 'echo "ERROR: Ligne $LINENO. Code de sortie: $?" >&2' ERR
 
-SCRIPT_VERSION="2.2.1"
+SCRIPT_VERSION="2.2.2"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE="/var/log/kafka-install-$(date +%Y%m%d-%H%M%S).log"
 KAFKA_VERSION="3.9.1"
@@ -518,24 +519,28 @@ install_kafka() {
 
 # === CONFIGURATION KAFKA ===
 configure_kafka() {
-    log "Configuration Kafka broker ID $NODE_ID..."
+    log "Configuration Kafka broker $NODE_ID..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log "[DRY-RUN] Configuration Kafka simulée"
-        return
+        log "[DRY-RUN] Simulation configuration Kafka"
+        return 0
     fi
 
-    # Récupération IP locale réelle
-    local local_ip=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
-    log "IP locale détectée: $local_ip"
+    # Détermination IP locale
+    local local_ip="${KAFKA_NODES[$NODE_ID]}"
+    log "IP locale broker $NODE_ID: $local_ip"
 
-    # Construction de la liste ZooKeeper
+    # Construction chaîne ZooKeeper connect UNIQUEMENT depuis KAFKA_NODES
     local zk_connect=""
-    for node_id in "${!KAFKA_NODES[@]}"; do
-        if [[ -n "$zk_connect" ]]; then
-            zk_connect+=","
+    local first_node=true
+    
+    for node_id in $(printf '%s\n' "${!KAFKA_NODES[@]}" | sort -n); do
+        if [[ "$first_node" == "true" ]]; then
+            zk_connect="${KAFKA_NODES[$node_id]}:2181"
+            first_node=false
+        else
+            zk_connect+=",${KAFKA_NODES[$node_id]}:2181"
         fi
-        zk_connect+="${KAFKA_NODES[$node_id]}:2181"
     done
 
     log "ZooKeeper connect string: $zk_connect"
