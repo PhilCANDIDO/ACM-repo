@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 # Changelog:
@@ -283,4 +282,3 @@ fi
 
 info "Report written to: ${LOG_FILE}"
 exit $overall_status
-```
