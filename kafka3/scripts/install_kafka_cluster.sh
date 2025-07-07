@@ -20,7 +20,7 @@
 set -euo pipefail
 trap 'echo "ERROR: Ligne $LINENO. Code de sortie: $?" >&2' ERR
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.2.1"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE="/var/log/kafka-install-$(date +%Y%m%d-%H%M%S).log"
 KAFKA_VERSION="3.9.1"
