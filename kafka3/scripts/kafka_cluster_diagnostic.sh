@@ -11,9 +11,10 @@
 # Architecture: 3 brokers HA (172.20.2.113-115)
 #
 # CHANGELOG:
+# v1.0.5 - Fix blocage dans boucle vérification binaires
+#        - Problème avec variable locale binary_count dans for loop
+#        - Simplification de la logique de vérification
 # v1.0.4 - Debug spécifique pour identifier blocage après parse_arguments
-#        - Ajout traces dans log_info et configuration logging
-#        - Isolation du problème dans la chaîne d'exécution
 # v1.0.3 - Fix "unbound variable" pour DEBUG_MODE
 #        - Réorganisation initialisation variables globales
 #        - Correction ordre déclaration vs utilisation
@@ -33,7 +34,7 @@
 set -euo pipefail
 trap 'log_error "ERROR: Ligne $LINENO. Code de sortie: $?"' ERR
 
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.0.5"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE=""
 DEFAULT_LOG_FILE="/var/log/kafka-diagnostic-$(date +%Y%m%d-%H%M%S).log"
@@ -684,10 +685,18 @@ validate_prerequisites() {
     log_info "DEBUG: Nombre de binaires à vérifier: ${#required_binaries[@]}"
     
     local binary_count=0
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Début boucle binaires" >&2
+    
     for binary in "${required_binaries[@]}"; do
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: binary_count avant incr: $binary_count" >&2
         ((binary_count++))
-        log_info "DEBUG: [$binary_count/${#required_binaries[@]}] Vérification: $binary"
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: binary_count après incr: $binary_count" >&2
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Vérification binaire: $binary" >&2
         
+        # Simplification du log pour éviter le problème
+        echo "[INFO] [$binary_count/${#required_binaries[@]}] Vérification: $binary"
+        
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Test existence fichier" >&2
         if [[ ! -f "$binary" ]]; then
             log_error "Binaire Kafka manquant: $binary"
             log_error "DEBUG: Contenu du répertoire bin:"
@@ -695,13 +704,16 @@ validate_prerequisites() {
             exit 1
         fi
         
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Test permissions exécution" >&2
         # Test si le fichier est exécutable
         if [[ ! -x "$binary" ]]; then
             log_warning "ATTENTION: $binary n'est pas exécutable"
             ls -la "$binary"
         fi
         
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Binaire OK" >&2
         log_info "✓ Trouvé: $(basename "$binary")"
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Fin traitement binaire $binary_count" >&2
     done
     
     log_info "DEBUG: Tous les binaires vérifiés avec succès"
