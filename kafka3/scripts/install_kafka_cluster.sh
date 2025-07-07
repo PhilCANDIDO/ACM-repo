@@ -679,40 +679,36 @@ create_systemd_service() {
     # Fichier service Kafka
     cat > /etc/systemd/system/kafka.service << EOF
 [Unit]
-Description=Apache Kafka Broker
+Description=Apache Kafka Server (Banking Cluster Node $NODE_ID)
 Documentation=https://kafka.apache.org/documentation/
-Requires=network.target
-After=network.target zookeeper.service
-Wants=zookeeper.service
+Requires=network.target remote-fs.target
+After=network.target remote-fs.target zookeeper.service
 
 [Service]
 Type=simple
 User=$KAFKA_USER
 Group=$KAFKA_GROUP
+Environment=JAVA_HOME=$JAVA_HOME
+Environment=KAFKA_HEAP_OPTS="-Xmx$JVM_HEAP_SIZE -Xms$JVM_HEAP_SIZE"
+Environment=KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
+Environment=KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$KAFKA_HOME/config/log4j.properties"
 ExecStart=$KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties
 ExecStop=$KAFKA_HOME/bin/kafka-server-stop.sh
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kafka
 KillMode=process
+TimeoutStopSec=30
 
-# Variables d'environnement
-Environment=JAVA_HOME=$JAVA_HOME
-Environment=KAFKA_HEAP_OPTS=-Xmx$JVM_HEAP_SIZE -Xms$JVM_HEAP_SIZE
-Environment=KAFKA_JVM_PERFORMANCE_OPTS=-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35
-Environment=KAFKA_GC_LOG_OPTS=-Xlog:gc*:$KAFKA_LOGS_DIR/kafka-gc.log:time,tags
-
-# Sécurité (PCI-DSS/ANSSI-BP-028)
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=$KAFKA_DATA_DIR $KAFKA_LOGS_DIR
-PrivateDevices=yes
-PrivateTmp=yes
-
-# Ressources
-LimitNOFILE=65536
-LimitNPROC=32768
+# Sécurité Banking (ANSSI-BP-028)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=$KAFKA_DATA_DIR $KAFKA_LOGS_DIR $KAFKA_HOME/logs
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
