@@ -455,41 +455,43 @@ install_java_rpm() {
 
 # === INSTALLATION KAFKA ===
 install_kafka() {
-    log "Installation Kafka $KAFKA_VERSION..."
-    
+    log "Installation Kafka $KAFKA_VERSION depuis repository local..."
+    log "URL Archive : http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    log "URL Checksum : http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log "[DRY-RUN] Installation Kafka simulée"
         return
     fi
-    
-    # Téléchargement Kafka depuis repository local
-    local kafka_url="http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_$SCALA_VERSION-$KAFKA_VERSION.tgz"
-    local kafka_file="/tmp/kafka_$SCALA_VERSION-$KAFKA_VERSION.tgz"
-    
-    if [[ ! -f "$kafka_file" ]]; then
-        log "Téléchargement Kafka depuis $kafka_url..."
-        curl -L "$kafka_url" -o "$kafka_file"
-        
-        if [[ ! -f "$kafka_file" ]]; then
-            error_exit "Échec téléchargement Kafka: $kafka_url"
+
+    cd /tmp
+
+    # Téléchargement depuis repository local
+    if ! curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"; then
+        error_exit "Échec téléchargement Kafka depuis $REPO_SERVER"
+    fi
+
+    # Vérification checksum si disponible
+    if curl -f "http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok" -o "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
+        if sha512sum -c "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz.sha512.ok"; then
+            log "✓ Checksum validé avec succès"
+        else
+            error_exit "Échec validation checksum Kafka"
         fi
+    else
+        log "ATTENTION: Pas de checksum disponible, proceeding sans validation"
     fi
-    
-    # Extraction Kafka
-    cd /opt
-    tar -xzf "$kafka_file"
-    
-    # Création lien symbolique
-    if [[ -L "$KAFKA_HOME" ]]; then
-        rm "$KAFKA_HOME"
-    fi
-    ln -s "/opt/kafka_$SCALA_VERSION-$KAFKA_VERSION" "$KAFKA_HOME"
-    
-    # Permissions et propriété
-    chown -R "$KAFKA_USER:$KAFKA_GROUP" "/opt/kafka_$SCALA_VERSION-$KAFKA_VERSION"
-    chown -h "$KAFKA_USER:$KAFKA_GROUP" "$KAFKA_HOME"
-    
-    log "✓ Kafka $KAFKA_VERSION installé dans $KAFKA_HOME"
+
+    # Extraction et installation
+    tar -xzf "kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz"
+    cp -r "kafka_${SCALA_VERSION}-${KAFKA_VERSION}"/* "$KAFKA_HOME/"
+
+    # Permissions de sécurité strictes (Banking Standards)
+    chown -R "$KAFKA_USER:$KAFKA_GROUP" "$KAFKA_HOME"
+    chmod -R 750 "$KAFKA_HOME"
+    chmod 755 "$KAFKA_HOME/bin"/*.sh
+
+    log "Kafka installé dans $KAFKA_HOME"
 }
 
 # === CONFIGURATION KAFKA ===
