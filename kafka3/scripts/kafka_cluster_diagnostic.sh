@@ -11,6 +11,17 @@
 # Architecture: 3 brokers HA (172.20.2.113-115)
 #
 # CHANGELOG:
+# v1.0.4 - Debug spécifique pour identifier blocage après parse_arguments
+#        - Ajout traces dans log_info et configuration logging
+#        - Isolation du problème dans la chaîne d'exécution
+# v1.0.3 - Fix "unbound variable" pour DEBUG_MODE
+#        - Réorganisation initialisation variables globales
+#        - Correction ordre déclaration vs utilisation
+# v1.0.2 - Ajout mode --debug avec set -x pour traçage complet
+#        - Traces de toutes les étapes d'exécution du script
+# v1.0.1 - Debug granulaire pour identifier blocages silencieux
+#        - Ajout traces détaillées dans validate_prerequisites
+#        - Option --skip-prereq pour contournement
 # v1.0.0 - Création script diagnostic multibroker selon méthode Basher Pro
 #        - Tests ZooKeeper, Kafka, connectivité, logs, API
 #        - Support modes dry-run, couleurs, logging
@@ -22,7 +33,7 @@
 set -euo pipefail
 trap 'log_error "ERROR: Ligne $LINENO. Code de sortie: $?"' ERR
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.4"
 SCRIPT_NAME="$(basename "$0")"
 LOG_FILE=""
 DEFAULT_LOG_FILE="/var/log/kafka-diagnostic-$(date +%Y%m%d-%H%M%S).log"
@@ -40,7 +51,8 @@ BROKERS_STRING=""
 ENABLE_LOGGING="false"
 DRY_RUN="false"
 VERBOSE="false"
-TEST_TOPIC="diag-test-$$"
+SKIP_PREREQ="false"
+TEST_TOPIC="diag-test-$"
 
 # === COULEURS ===
 RED='\033[0;31m'
@@ -51,9 +63,13 @@ NC='\033[0m' # No Color
 
 # === FONCTIONS LOGGING ===
 log_info() {
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_LOG: Entrée dans log_info avec: $*" >&2
     local message="[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_LOG: Message formaté: $message" >&2
     echo -e "${BLUE}${message}${NC}"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_LOG: Après echo du message" >&2
     [[ "$ENABLE_LOGGING" == "true" ]] && echo "$message" >> "$LOG_FILE"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_LOG: Sortie de log_info" >&2
 }
 
 log_success() {
@@ -96,14 +112,16 @@ OPTIONS:
     --log-file <chemin>               Journaliser dans un fichier
     --dry-run                         Mode test sans modification
     --verbose                         Mode verbeux pour debug
+    --debug                           Mode debug complet avec traces (set -x)
+    --skip-prereq                     Ignorer la validation des prérequis
     
 EXEMPLES:
     # Diagnostic cluster ACM standard
     $SCRIPT_NAME --brokers "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115"
     
-    # Avec logging et mode verbeux
+    # Avec logging, mode verbeux et debug
     $SCRIPT_NAME --brokers "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115" \\
-                 --log-file /var/log/kafka-diag.log --verbose
+                 --log-file /var/log/kafka-diag.log --verbose --debug
     
     # Mode test sans modification
     $SCRIPT_NAME --brokers "1:172.20.2.113,2:172.20.2.114,3:172.20.2.115" --dry-run
@@ -130,6 +148,15 @@ EOF
 
 # === PARSING ARGUMENTS ===
 parse_arguments() {
+    # Initialisation des variables par défaut
+    BROKERS_STRING=""
+    LOG_FILE=""
+    ENABLE_LOGGING="false"
+    DRY_RUN="false"
+    VERBOSE="false"
+    DEBUG_MODE="false"
+    SKIP_PREREQ="false"
+    
     while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--help)
@@ -157,6 +184,16 @@ parse_arguments() {
                 VERBOSE="true"
                 shift
                 ;;
+            --debug)
+                DEBUG_MODE="true"
+                VERBOSE="true"  # Debug implique verbose
+                set -x  # Activation du trace complet
+                shift
+                ;;
+            --skip-prereq)
+                SKIP_PREREQ="true"
+                shift
+                ;;
             *)
                 log_error "Argument inconnu: $1"
                 show_help
@@ -179,10 +216,10 @@ parse_arguments() {
 }
 
 # === PARSING CONFIGURATION BROKERS ===
-declare -A BROKER_IDS
-declare -A BROKER_IPS
-
 parse_brokers_config() {
+    # Initialisation des tableaux associatifs
+    declare -gA BROKER_IDS
+    declare -gA BROKER_IPS
     log_info "Parsing configuration brokers: $BROKERS_STRING"
     
     # Validation format
@@ -586,15 +623,55 @@ display_summary() {
 
 # === VALIDATION PRÉREQUIS ===
 validate_prerequisites() {
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Entrée dans validate_prerequisites" >&2
     log_info "Validation des prérequis du diagnostic"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Après log_info initial" >&2
     
-    # Vérification Kafka
+    # Debug: État du script avant les vérifications
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Début debug état script" >&2
+    log_info "DEBUG: Début de validate_prerequisites"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Après log_info debug début" >&2
+    log_info "DEBUG: KAFKA_HOME=$KAFKA_HOME"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_PREREQ: Après log_info KAFKA_HOME" >&2
+    log_info "DEBUG: PWD=$(pwd)"
+    log_info "DEBUG: USER=$(whoami)"
+    
+    # Vérification Kafka avec debug ultra-détaillé
+    log_info "Vérification répertoire Kafka: $KAFKA_HOME"
     if [[ ! -d "$KAFKA_HOME" ]]; then
         log_error "Répertoire Kafka non trouvé: $KAFKA_HOME"
+        log_info "DEBUG: Tentative de localisation de Kafka..."
+        
+        # Recherche alternative de Kafka
+        local kafka_paths=("/opt/kafka" "/usr/local/kafka" "/home/kafka" "/var/lib/kafka")
+        for path in "${kafka_paths[@]}"; do
+            log_info "DEBUG: Test existence: $path"
+            if [[ -d "$path" ]]; then
+                log_info "DEBUG: Trouvé répertoire: $path"
+                ls -la "$path" 2>/dev/null | head -5 || true
+            fi
+        done
+        
+        log_error "Veuillez vérifier que Kafka est installé ou ajuster KAFKA_HOME"
+        exit 1
+    fi
+    log_info "✓ Répertoire Kafka trouvé: $KAFKA_HOME"
+    
+    # Debug: Contenu du répertoire Kafka
+    log_info "DEBUG: Contenu de $KAFKA_HOME:"
+    ls -la "$KAFKA_HOME" 2>/dev/null | head -10 || log_warning "Impossible de lister $KAFKA_HOME"
+    
+    # Vérification bin/ avec debug
+    log_info "DEBUG: Vérification existence de $KAFKA_HOME/bin/"
+    if [[ ! -d "$KAFKA_HOME/bin" ]]; then
+        log_error "Répertoire bin manquant: $KAFKA_HOME/bin"
         exit 1
     fi
     
-    # Vérification binaires essentiels
+    log_info "DEBUG: Contenu de $KAFKA_HOME/bin/ (premiers fichiers):"
+    ls -la "$KAFKA_HOME/bin/" 2>/dev/null | head -10 || log_warning "Impossible de lister $KAFKA_HOME/bin/"
+    
+    # Vérification binaires essentiels avec debug ultra-détaillé
     local required_binaries=(
         "$KAFKA_HOME/bin/kafka-topics.sh"
         "$KAFKA_HOME/bin/kafka-console-producer.sh"
@@ -603,57 +680,158 @@ validate_prerequisites() {
         "$KAFKA_HOME/bin/zookeeper-shell.sh"
     )
     
+    log_info "Vérification des binaires Kafka..."
+    log_info "DEBUG: Nombre de binaires à vérifier: ${#required_binaries[@]}"
+    
+    local binary_count=0
     for binary in "${required_binaries[@]}"; do
+        ((binary_count++))
+        log_info "DEBUG: [$binary_count/${#required_binaries[@]}] Vérification: $binary"
+        
         if [[ ! -f "$binary" ]]; then
             log_error "Binaire Kafka manquant: $binary"
+            log_error "DEBUG: Contenu du répertoire bin:"
+            ls -la "$KAFKA_HOME/bin/" 2>/dev/null | grep "$(basename "$binary")" || log_error "Binaire non trouvé"
             exit 1
         fi
+        
+        # Test si le fichier est exécutable
+        if [[ ! -x "$binary" ]]; then
+            log_warning "ATTENTION: $binary n'est pas exécutable"
+            ls -la "$binary"
+        fi
+        
+        log_info "✓ Trouvé: $(basename "$binary")"
     done
     
-    # Vérification nc (netcat)
+    log_info "DEBUG: Tous les binaires vérifiés avec succès"
+    
+    # Vérification nc (netcat) avec debug
+    log_info "DEBUG: Début vérification netcat"
+    log_info "Vérification de la commande 'nc' (netcat)..."
+    
     if ! command -v nc > /dev/null 2>&1; then
         log_error "Commande 'nc' (netcat) requise non disponible"
+        log_info "DEBUG: Tentative de localisation de netcat..."
+        
+        # Recherche alternative de netcat
+        local nc_alternatives=("ncat" "netcat" "/usr/bin/nc" "/bin/nc")
+        for alt in "${nc_alternatives[@]}"; do
+            log_info "DEBUG: Test existence: $alt"
+            if command -v "$alt" > /dev/null 2>&1; then
+                log_info "DEBUG: Alternative trouvée: $(which "$alt")"
+            fi
+        done
+        
+        log_error "Installation requise: yum install -y nmap-ncat"
         exit 1
     fi
     
-    log_success "✓ Prérequis validés"
+    local nc_path=$(which nc)
+    log_info "✓ Commande 'nc' disponible: $nc_path"
+    log_info "DEBUG: Version nc: $(nc -h 2>&1 | head -2 || echo 'Version non disponible')"
+    
+    log_info "DEBUG: Fin de validate_prerequisites - SUCCÈS"
+    log_success "✓ Tous les prérequis sont validés"
 }
 
 # === FONCTION PRINCIPALE ===
 main() {
+    # Initialisation des variables de contrôle (redondant mais sécurisé)
+    DEBUG_MODE="${DEBUG_MODE:-false}"
+    VERBOSE="${VERBOSE:-false}"
+    DRY_RUN="${DRY_RUN:-false}"
+    SKIP_PREREQ="${SKIP_PREREQ:-false}"
+    ENABLE_LOGGING="${ENABLE_LOGGING:-false}"
+    
+    # Debug: Trace du début de main()
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Entrée dans main() avec arguments: $*"
+    
     # Initialisation
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début parse_arguments"
     parse_arguments "$@"
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin parse_arguments"
     
     # Configuration logging
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Début configuration logging" >&2
     if [[ "$ENABLE_LOGGING" == "true" ]]; then
+        [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Configuration logging activée"
         log_info "Diagnostic Kafka démarré - Log: $LOG_FILE"
     fi
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Fin configuration logging" >&2
+    
+    # Validation et parsing (avant l'affichage du résumé)
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Début validation prérequis" >&2
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début validation prérequis"
+    if [[ "$SKIP_PREREQ" == "false" ]]; then
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Appel validate_prerequisites" >&2
+        validate_prerequisites
+        [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Retour validate_prerequisites" >&2
+    else
+        log_warning "⚠️  Validation des prérequis ignorée (--skip-prereq)"
+    fi
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin validation prérequis"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Fin validation prérequis" >&2
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début parse_brokers_config"
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Appel parse_brokers_config" >&2
+    parse_brokers_config
+    [[ "$DEBUG_MODE" == "true" ]] && echo "DEBUG_MAIN: Retour parse_brokers_config" >&2
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin parse_brokers_config"
     
     # Affichage en-tête
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début display_summary"
     display_summary
-    
-    # Validation et parsing
-    validate_prerequisites
-    parse_brokers_config
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin display_summary"
     
     # Exécution des tests
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début des tests de diagnostic"
     log_info "Début du diagnostic cluster Kafka ($SCRIPT_VERSION)"
     
     local tests_passed=0
     local tests_total=9
     
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début exécution des 9 tests"
+    
     # Exécution de chaque test
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 1 - ZooKeeper connectivity"
     test_zookeeper_connectivity && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 2 - ZooKeeper roles"
     test_zookeeper_roles && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 3 - Brokers in ZooKeeper"
     test_brokers_in_zookeeper && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 4 - Kafka ports"
     test_kafka_ports && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 5 - Kafka API"
     test_kafka_api && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 6 - Kafka logs"
     test_kafka_logs && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 7 - Consumer offsets topic"
     test_consumer_offsets_topic && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 8 - Cluster metadata"
     test_cluster_metadata && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed: $tests_passed"
+    
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Test 9 - End to end"
     test_end_to_end && ((tests_passed++)) || true
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Tests passed final: $tests_passed"
     
     # Résumé final
+    [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Début résumé final"
     echo ""
     echo "=========================================================================="
     echo "                        RÉSULTAT FINAL"
@@ -662,11 +840,13 @@ main() {
     if [[ $tests_passed -eq $tests_total ]]; then
         log_success "🎉 DIAGNOSTIC RÉUSSI: $tests_passed/$tests_total tests passés"
         log_success "✅ Le cluster Kafka est fonctionnel et cohérent"
+        [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin du script avec succès"
         exit 0
     else
         local tests_failed=$((tests_total - tests_passed))
         log_error "❌ DIAGNOSTIC ÉCHEC: $tests_passed/$tests_total tests passés ($tests_failed échecs)"
         log_error "⚠️  Le cluster Kafka présente des dysfonctionnements"
+        [[ "$DEBUG_MODE" == "true" ]] && log_info "DEBUG: Fin du script avec échec"
         exit 1
     fi
 }
