@@ -46,7 +46,7 @@ JVM_HEAP_SIZE="2g"
 # === VARIABLES GLOBALES ===
 NODE_ID=""
 REPO_SERVER="172.20.2.109"
-REPO_SERVER_BASEURL="/repos"
+REPO_SERVER_BASEURL="repos"
 DRY_RUN="false"
 CHECK_FS_ONLY="false"
 SKIP_VALIDATION="false"
@@ -463,7 +463,7 @@ install_kafka() {
     fi
     
     # Téléchargement Kafka depuis repository local
-    local kafka_url="http://$REPO_SERVER$REPO_SERVER_BASEURL/kafka_$SCALA_VERSION-$KAFKA_VERSION.tgz"
+    local kafka_url="http://$REPO_SERVER/$REPO_SERVER_BASEURL/kafka3/kafka_$SCALA_VERSION-$KAFKA_VERSION.tgz"
     local kafka_file="/tmp/kafka_$SCALA_VERSION-$KAFKA_VERSION.tgz"
     
     if [[ ! -f "$kafka_file" ]]; then
